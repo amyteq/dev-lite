@@ -61,6 +61,22 @@ class Routing(unittest.TestCase):
         with self.assertRaises(normalize_event.Skip):
             normalize_event.extract(payload, 'pull_request_target', AgentConfig('codex', {}))
 
+    def test_an_escaped_backtick_before_a_multiline_code_span_routes_its_example_read_only(self):
+        # F005 round 4: the escaped backtick is literal, so the real opener keeps the example request in code.
+        quoted = 'Escape a backtick as \\` in prose, then wrap the example in `\n@codex fix the spelling\n` like this.'
+        for body, writable in ((quoted, False), ('Plain prose first.\n@codex fix the spelling', True)):
+            with self.subTest(body=body), tempfile.TemporaryDirectory() as folder:
+                event = Path(folder, 'event.json')
+                payload = {'action': 'created', 'repository': {'default_branch': 'main'}, 'sender': {'login': 'maintainer', 'type': 'User'},
+                           'issue': {'number': 15}, 'comment': {'body': body}}
+                with patch.dict(os.environ, {'AGENT': 'codex', 'CODEX_ACTION_ENABLED': 'true', 'EVENT_FILE': str(event),
+                                            'GITHUB_EVENT_NAME': 'issue_comment', 'GITHUB_REPOSITORY': 'example-org/example-repo'}, clear=True), \
+                     patch.object(normalize_event, 'read_event', return_value=payload), \
+                     patch.object(normalize_event, 'set_outputs'), redirect_stdout(io.StringIO()):
+                    self.assertEqual(normalize_event.main(), 0)
+                routed = json.loads(event.read_text())
+                self.assertEqual((routed['command'], routed['writable']), ('fix', writable))
+
     def test_bot_cannot_opt_in_with_a_configuration_variable(self):
         payload = {'action': 'created', 'repository': {'default_branch': 'main'}, 'sender': {'login': 'automation', 'type': 'Bot'},
                    'issue': {'number': 15}, 'comment': {'body': '@codex implement this'}}
@@ -418,35 +434,60 @@ def workflow_step(name):
     return WORKFLOW[start:end]
 
 
+GATE = workflow_step('Stop before rendering a credential-shaped variable')
+# Each check of the rendered values: (format template, listed `vars.NAME` arguments, matched text).
+CONSUMED = re.findall(r"contains\(format\('([^']*)',(.*?)\), '([^']*)'\)", GATE, re.DOTALL)
+
+
+def gate_stops(variables):
+    """The gate as Actions evaluates it: `contains` ignores case, `toJSON(vars)` is indented JSON that leaves
+    non-ASCII text unescaped, and `format` fills each listed variable, or an empty string when it is unset."""
+    rendered = json.dumps(variables, indent=2, ensure_ascii=False).lower()
+    needles = [literal.replace("''", "'").lower() for literal in re.findall(r"contains\(toJSON\(vars\), '((?:[^']|'')*)'\)", GATE)]
+    filled = [(template.format(*(variables.get(name.strip().removeprefix('vars.'), '') for name in names.split(','))), needle)
+              for template, names, needle in CONSUMED]
+    return any(text in rendered for text in needles) or any(needle.lower() in text.lower() for text, needle in filled)
+
+
 class WorkflowGates(unittest.TestCase):
     def test_a_credential_shaped_variable_stops_before_the_routing_step_renders_it(self):
-        gate = workflow_step('Stop before rendering a credential-shaped variable')
-        self.assertLess(WORKFLOW.index(gate), WORKFLOW.index('      - name: Route mention\n'))
-        self.assertNotIn('env:', gate)
-        self.assertNotIn('${{', gate)
-        self.assertIn('exit 1', gate)
+        self.assertLess(WORKFLOW.index(GATE), WORKFLOW.index('      - name: Route mention\n'))
+        self.assertNotIn('env:', GATE)
+        self.assertNotIn('${{', GATE)
+        self.assertIn('exit 1', GATE)
         from agent_lib import _CREDENTIAL_JSON_KEYS, _CREDENTIAL_PREFIXES
         for prefix in _CREDENTIAL_PREFIXES:
-            self.assertIn(f"contains(toJSON(vars), '\"{prefix}')", gate)
+            self.assertTrue(gate_stops({'CODEX_ACTION_MODEL': ' ' + prefix + 'x' * 20}), prefix)
         for key in _CREDENTIAL_JSON_KEYS:
-            self.assertIn(f"{key.split('_')[-1]}\\\"')", gate)
+            self.assertIn(f"{key.split('_')[-1]}\\\"')", GATE)
+        # The values checked for `sk-` and `sk_live` anywhere are exactly the ones the routing step renders, in its order.
+        rendered = re.findall(r'^ +((?:CLAUDE|CODEX)_ACTION_\w+): \$\{\{ vars\.\1 \}\}$', workflow_step('Route mention'), re.M)
+        self.assertEqual([needle for _, _, needle in CONSUMED], ['sk-', 'sk_live'])
+        for template, names, _ in CONSUMED:
+            self.assertEqual([name.strip().removeprefix('vars.') for name in names.split(',')], rendered)
+            self.assertEqual(template, ' '.join(f'{{{index}}}' for index in range(len(rendered))))
 
     def test_the_gate_catches_every_value_the_routing_step_recognises(self):
         from agent_lib import credential_shaped_variables
-        gate = workflow_step('Stop before rendering a credential-shaped variable')
-        needles = [literal.replace("''", "'") for literal in re.findall(r"contains\(toJSON\(vars\), '((?:[^']|'')*)'\)", gate)]
         fake = 'sk-' + 'proj-' + 'x' * 24
+        # F004 round 4: Unicode padding, one character or several, before a prefix or JSON credential.
+        padded = [' ' + fake, ' 　 ' + fake, ' ghp_' + 'x' * 20, ' {"access_' + 'token": "a"}']
         values = ['configured-model', '', fake, ' ' + fake, '\n' + fake, '\t' + fake, '\r\n' + fake, '\x0b' + fake,
-                  '{"tokens": {"refresh_' + 'token": "r"}}', ' {"access_' + 'token": "a"}', 'high', 'Bash(gh pr:*)']
+                  '{"tokens": {"refresh_' + 'token": "r"}}', ' {"access_' + 'token": "a"}', 'high', 'Bash(gh pr:*)', *padded]
         for value in values:
             with self.subTest(value=repr(value)):
-                # Actions renders `toJSON(vars)` as indented JSON without escaping non-ASCII text.
-                rendered = json.dumps({'CLAUDE_ACTION_MODEL': value, 'UNRELATED': 'x'}, indent=2, ensure_ascii=False).lower()
-                stops = any(needle.lower() in rendered for needle in needles)
-                if credential_shaped_variables({'CLAUDE_ACTION_MODEL': value}):
+                stops = gate_stops({'CLAUDE_ACTION_MODEL': value, 'UNRELATED': 'x'})
+                flagged = credential_shaped_variables({'CLAUDE_ACTION_MODEL': value})
+                if flagged:
                     self.assertTrue(stops, 'the routing step would render a value it then refuses')
+                if value in padded:
+                    self.assertTrue(flagged and stops, 'configuration consumption strips the padding')
                 if value in ('configured-model', '', 'high', 'Bash(gh pr:*)'):
                     self.assertFalse(stops)
+        # Ordinary words contain `sk-`: in a variable the routing step never renders, they do not stop the run.
+        self.assertFalse(gate_stops({'CLAUDE_ACTION_MODEL': 'configured-model', 'DEPLOY_TARGET': 'flask-app', 'QUEUE': 'Task-runner',
+                                     'TASK_LIVE_URL': 'https://example.invalid/disk_live'}))
+        self.assertTrue(gate_stops({'CODEX_ACTION_EFFORT': 'high', 'CLAUDE_ACTION_MAX_TURNS': ' ' + fake}))
 
     def test_debug_logging_stops_before_any_job_evaluates_a_variable(self):
         first_vars = WORKFLOW.index('vars')

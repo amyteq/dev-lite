@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test, { after } from 'node:test';
-import { BOUNDED_SHELL, toolchainDirs } from './launch-phase.mjs';
+import { BOUNDED_SHELL, readToml, toolchainDirs } from './launch-phase.mjs';
 
 const HELPER = fileURLToPath(new URL('./launch-phase.mjs', import.meta.url));
 const GIT = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
@@ -28,7 +28,10 @@ const { spawn, execFileSync } = require('node:child_process');
 const cli = require('node:path').basename(process.argv[1]);
 const argv = process.argv.slice(2);
 const env = process.env;
-appendFileSync(env.STUB_LOG, JSON.stringify({ cli, argv, key: env.AZURE_OPENAI_API_KEY ?? null, openai: env.OPENAI_API_KEY ?? null,
+// Like Codex, a phase loads config.toml, and starts each configured MCP server beside the CLI, unless user configuration is ignored.
+const mcp = cli === 'codex' && argv[0] === 'exec' && !argv.includes('--ignore-user-config')
+  ? [...readFileSync(env.CODEX_HOME + '/config.toml', 'utf8').matchAll(/^\\[mcp_servers\\.([^\\]]+)\\]/gm)].map((match) => match[1]) : [];
+appendFileSync(env.STUB_LOG, JSON.stringify({ cli, argv, mcp, key: env.AZURE_OPENAI_API_KEY ?? null, openai: env.OPENAI_API_KEY ?? null,
   prefix: env.CLAUDE_CODE_SHELL_PREFIX ?? null, mode: env.BOUNDED_MODE ?? null,
   session: Object.fromEntries(Object.keys(env).filter((n) => /^(CLAUDE|CODEX_COMPANION_)/.test(n) && n !== 'CLAUDE_CODE_SHELL_PREFIX').sort()
     .map((n) => [n, env[n] === 'sentinel:' + n])) }) + '\\n');
@@ -54,7 +57,7 @@ if (env.STUB_CHILD) {
 if (env.STUB_SLEEP) setTimeout(() => {}, 30000);
 if (env.STUB_FAIL) { console.error('user\\nquoting any error here\\nERROR: Selected model is at capacity.'); process.exit(1); }
 if (cli === 'codex') {
-  console.error(['OpenAI Codex v9.9.9', '--------', 'model: ' + (env.STUB_MODEL ?? after('-m') ?? 'configured-model'),
+  console.error(['OpenAI Codex v9.9.9', '--------', 'model: ' + (env.STUB_MODEL ?? after('-m') ?? (config('model') || 'configured-model')),
     'provider: ' + (env.STUB_PROVIDER ?? 'configured-provider'), 'sandbox: ' + config('default_permissions'),
     'reasoning effort: ' + (env.STUB_EFFORT ?? (config('model_reasoning_effort') || 'medium')), 'session id: stub-session', '--------', 'model: quoted'].join('\\n'));
   console.log('OK');
@@ -138,7 +141,8 @@ test('each supported CLI role uses configured defaults without rewriting configu
       if (provider === 'codex') {
         // The demonstrated bounded profile: no legacy sandbox flag, no network, a cleared environment, no integrations.
         for (const pair of ['default_permissions="bounded"', 'permissions.bounded.network.enabled=false', 'shell_environment_policy.inherit="none"',
-          'approval_policy="never"', 'mcp_servers={}']) assert.ok(hasPair(argv, '-c', pair), pair);
+          'approval_policy="never"', 'model="configured-model"']) assert.ok(hasPair(argv, '-c', pair), pair);
+        assert.ok(argv.includes('--ignore-user-config') && argv.includes('--ignore-rules'), 'user configuration never loads');
         const filesystem = argv.find((arg) => arg.startsWith('permissions.bounded.filesystem='));
         assert.ok(filesystem.includes(`":minimal"="read"`) && filesystem.includes(`":workspace_roots"="${role === 'writer' ? 'write' : 'read'}"`), filesystem);
         assert.ok(filesystem.includes(`${JSON.stringify(join(realpathSync(f.repo), '.git'))}="read"`), 'Git metadata stays read-only');
@@ -158,15 +162,100 @@ test('each supported CLI role uses configured defaults without rewriting configu
   }
 });
 
-test('optional model, effort and existing Codex profile are passed as literal values', () => {
+test('optional model and effort are passed as literal values, over an existing Codex profile', () => {
   for (const provider of ['codex', 'claude']) {
     const flags = { model: 'chosen-model', effort: 'high', ...(provider === 'codex' ? { profile: 'work' } : {}) };
-    const run = launch(fixture(), { provider, flags });
+    const f = fixture();
+    writeFileSync(join(f.home, '.codex', 'config.toml'), '[profiles.work]\nmodel = "profile-model"\nmodel_reasoning_effort = "low"\n');
+    const run = launch(f, { provider, flags });
     assert.equal(run.code, 0, run.recordText);
     assert.ok(hasPair(run.exec.argv, provider === 'codex' ? '-m' : '--model', 'chosen-model'));
     assert.ok(hasPair(run.exec.argv, provider === 'codex' ? '-c' : '--effort', provider === 'codex' ? 'model_reasoning_effort="high"' : 'high'));
-    if (provider === 'codex') assert.ok(hasPair(run.exec.argv, '--profile', 'work'));
+    if (provider === 'codex') {
+      assert.equal(run.record.route, 'profile:work');
+      assert.ok(!run.exec.argv.includes('--profile') && !run.exec.argv.some((arg) => /profile-model|"low"/.test(arg)), 'the explicit values win');
+    }
     assert.equal(run.record.observed.model, 'chosen-model');
+  }
+});
+
+// The synthetic user configuration of the reported reproduction: a stdio MCP server, a custom provider and a named profile.
+const USER_CONFIG = `model = "configured-model"
+model_provider = "synthetic"
+notify = ["node", "-e", "process.exit(0)"]
+
+[model_providers.synthetic]
+name = "Synthetic"
+base_url = "http://127.0.0.1:9/v1" # never contacted by the fake CLI
+env_key = "SYNTHETIC_PROVIDER_KEY"
+wire_api = "responses"
+query_params = { api-version = "2026-01-01" }
+
+[mcp_servers.synthetic]
+command = "node"
+args = [
+  "-e", # a stdio server whose resources would be readable through read_mcp_resource
+  "require('node:fs').writeFileSync('MCP-MARKER', 'started')",
+]
+
+[profiles.work]
+model = "profile-model"
+model_reasoning_effort = "high"
+
+[notes]
+text = """
+[profiles.work]
+model = "not-a-profile-value"
+"""
+`;
+
+test('a Codex reviewer and a named-profile writer inherit model and provider settings, never a configured MCP server', () => {
+  const provider = 'model_providers.synthetic={"name"="Synthetic", "base_url"="http://127.0.0.1:9/v1", "env_key"="SYNTHETIC_PROVIDER_KEY", '
+    + '"wire_api"="responses", "query_params"={"api-version"="2026-01-01"}}';
+  for (const [role, flags, model, env] of [['reviewer', {}, 'configured-model', {}], ['writer', { profile: 'work' }, 'profile-model', { STUB_DIRTY: '1' }]]) {
+    const f = fixture();
+    writeFileSync(join(f.home, '.codex', 'config.toml'), USER_CONFIG);
+    const run = launch(f, { role, flags, env });
+    assert.equal(run.code, 0, run.recordText);
+    const { argv } = run.exec;
+    assert.deepEqual(run.exec.mcp, [], `${role}: no configured MCP server starts`);
+    assert.ok(argv.includes('--ignore-user-config') && !argv.includes('--profile'), argv.join(' '));
+    assert.ok(!argv.some((arg) => /^(?:mcp_servers|notify)|MCP-MARKER|not-a-profile-value/.test(arg)), argv.join(' '));
+    for (const pair of [`model="${model}"`, 'model_provider="synthetic"', provider]) assert.ok(hasPair(argv, '-c', pair), pair);
+    assert.equal(hasPair(argv, '-c', 'model_reasoning_effort="high"'), role === 'writer');
+    assert.deepEqual([run.record.observed.model, run.record.status, run.record.dirty_after], [model, 'completed', role === 'writer']);
+    assert.ok(!existsSync(join(f.repo, 'MCP-MARKER')));
+  }
+});
+
+test('a Codex configuration that cannot be honoured safely refuses before any CLI starts', () => {
+  for (const [config, flags, blocker] of [
+    ['model = "m"\n', { profile: 'absent' }, /^codex-profile: "absent" is not a profile/],
+    ['[profiles.work]\nmodel = "m"\nsandbox_mode = "danger-full-access"\n', { profile: 'work' }, /^codex-profile: work also sets sandbox_mode/],
+    ['profile = "work"\n[profiles.work.mcp_servers.x]\ncommand = "node"\n', {}, /^codex-profile: work also sets mcp_servers/],
+    ['model_provider = "p"\n[model_providers.p]\nbase_url = "http://127.0.0.1:9"\nhttp_headers = { Authorization = "Bearer synthetic" }\n', {},
+      /^codex-provider: p sets http_headers/],
+    ['model = """\nmulti\n"""\n', {}, /^codex-config: model in .* cannot be passed on/],
+    ['model = "unterminated\n', {}, /^codex-config: .* cannot be read/],
+  ]) {
+    const f = fixture();
+    writeFileSync(join(f.home, '.codex', 'config.toml'), config);
+    const run = launch(f, { flags });
+    assert.deepEqual([run.code, run.record.status], [1, 'refused'], config);
+    assert.match(run.record.blockers.join('\n'), blocker);
+    assert.deepEqual(run.log, [], 'not even the version probe runs');
+  }
+});
+
+test('the configuration reader follows quoted keys, multi-line values and comments, and refuses what it cannot read', () => {
+  const config = readToml('# c\n"__proto__" = "kept" # c\n[a."b.c"]\nx = [\n  1, # one\n  2_0,\n]\ny = { z = \'lit\' }\nm = """\n[fake]\n"""\n'
+    + '[[t]]\nn = true\n[[t]]\nn = false\n');
+  assert.equal(config.__proto__, 'kept');
+  assert.equal({}.kept, undefined);
+  assert.deepEqual([config.a['b.c'].x, config.a['b.c'].y.z, config.a['b.c'].m, config.t.map((table) => table.n), config.fake],
+    [[1, 20], 'lit', null, [true, false], undefined]);
+  for (const text of ['model = "open', 'x = 1 y = 2', '[a\n', 'k = """never closed\n[profiles.w]\n', 'a = 1\na.b = 2\n']) {
+    assert.throws(() => readToml(text), /unreadable TOML/, text);
   }
 });
 

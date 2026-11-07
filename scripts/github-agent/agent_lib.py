@@ -178,16 +178,17 @@ def credential_shaped_variables(variables: dict[str, str]) -> list[str]:
     """Names of configuration variables whose value looks like a credential.
 
     This never flags a value the workflow's earlier gate lets through, so nothing it
-    recognises reaches a rendered step: the value is read unstripped, a leading space or
-    control character is refused as the gate refuses it, and a JSON key counts only with
-    its closing quote.
+    recognises reaches a rendered step: a leading space or control character is refused
+    as the gate refuses it, a prefix counts after any whitespace `get` strips (the gate
+    matches prefixes anywhere), and a JSON key counts only with its closing quote.
     """
     flagged = []
     for name, value in sorted(variables.items()):
         text = value or ""
-        if text[:1] == " " or (text and ord(text[0]) < 32) or text.startswith(_CREDENTIAL_PREFIXES):
+        stripped = text.lstrip()
+        if text[:1] == " " or (text and ord(text[0]) < 32) or stripped.startswith(_CREDENTIAL_PREFIXES):
             flagged.append(name)
-        elif text.startswith("{") and any(f'{key}"' in text.lower() for key in _CREDENTIAL_JSON_KEYS):
+        elif stripped.startswith("{") and any(f'{key}"' in text.lower() for key in _CREDENTIAL_JSON_KEYS):
             flagged.append(name)
     return flagged
 
@@ -419,16 +420,22 @@ def code_may_be_open_at_mention(text: str, mention: str) -> bool:
 
     A writable run needs certainty, and Markdown containers such as list items let
     fences and multi-line code spans open where the masking above does not look. So
-    any fence before the mention, or a backtick run not closed by an equal-length run
-    before it, counts as open code; the request then runs read-only.
+    any fence before the mention counts as open code, and so does a backtick run not
+    closed by an equal-length run in the same stretch: a run across a line break,
+    table pipe or tag end may sit in another paragraph, cell, HTML tag or autolink,
+    and a backtick after a backslash is literal in prose but not in code or HTML, so
+    neither can be trusted to close the real opener. The request then runs read-only.
     """
     before = (text or "")[: max(find_mention(text, mention), 0)]
     if "```" in before or "~~~" in before:
         return True
-    open_run = None
-    for run in re.findall(r"`+", before):
-        open_run = None if run == open_run else open_run or run
-    return open_run is not None
+    for stretch in re.split(r"[\r\n|>]", before):
+        open_run = None
+        for run in re.findall(r"`+", stretch):
+            open_run = None if run == open_run else open_run or run
+        if open_run is not None or "\\`" in stretch:
+            return True
+    return False
 
 
 def branch_list(text: str | None) -> list[str]:

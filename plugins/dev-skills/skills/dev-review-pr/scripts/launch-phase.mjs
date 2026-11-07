@@ -106,11 +106,101 @@ export function toolchainDirs(path, env) {
 const gitLink = (worktree) => { const path = join(worktree, '.git');
   try { return lstatSync(path).isFile() ? readFileSync(path, 'utf8') : lstatSync(path).isDirectory() ? 'directory' : 'other'; } catch { return 'missing'; } };
 
-const toml = (table) => `{${Object.entries(table).map(([key, value]) => `${JSON.stringify(key)}=${JSON.stringify(value)}`).join(', ')}}`;
+const isTable = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const toml = (value) => (isTable(value) ? `{${Object.entries(value).map(([key, item]) => `${JSON.stringify(key)}=${toml(item)}`).join(', ')}}`
+  : JSON.stringify(value));
 
-// Provider credentials and setup stay in the installed CLI's own process and configuration; model-directed tools reach only
-// the bounded worker. Optional model/effort/profile arguments select existing capabilities without copying configuration.
-function launchCommand(request, bounds) {
+// Reads the TOML that config.toml holds into null-prototype tables: tables and arrays of tables, dotted and quoted keys,
+// strings, numbers, booleans, arrays and inline tables, across lines and comments. A multi-line string or any other value
+// kept only as text reads as null and is never passed on; anything unreadable throws, so the phase refuses, not guesses.
+export function readToml(text) {
+  let at = 0;
+  const fail = () => { throw new Error(`unreadable TOML at offset ${at}`); };
+  const eat = (pattern) => { pattern.lastIndex = at; const match = pattern.exec(text); if (match) at = pattern.lastIndex; return match; };
+  const must = (pattern) => eat(pattern) ?? fail();
+  const gap = () => eat(/(?:[ \t\r\n]|#[^\n]*)*/y);
+  const space = () => eat(/[ \t]*/y);
+  const table = () => Object.create(null);
+  const string = () => {
+    if (eat(/"""(?:[^"\\]|\\[\s\S]|"(?!""))*"""|'''[\s\S]*?'''/y)) return null;
+    const basic = eat(/"((?:[^"\\\n]|\\.)*)"/y);
+    if (basic) { try { return JSON.parse(`"${basic[1].replace(/\t/g, '\\t')}"`); } catch { return fail(); } }
+    return eat(/'([^'\n]*)'/y)?.[1];
+  };
+  const key = () => { const parts = []; do {
+    space(); let part = string(); if (part === undefined) part = eat(/[A-Za-z0-9_-]+/y)?.[0];
+    parts.push(typeof part === 'string' ? part : fail()); space(); } while (eat(/\./y)); return parts; };
+  const walk = (from, path) => path.reduce((node, part) => {
+    if (!Object.hasOwn(node, part)) node[part] = table();
+    const next = Array.isArray(node[part]) ? node[part].at(-1) : node[part];
+    return isTable(next) ? next : fail(); }, from);
+  const assign = (target, path) => { must(/=/y); space(); walk(target, path.slice(0, -1))[path.at(-1)] = value(); };
+  const sequence = (close, item) => { for (;;) { gap(); if (eat(close)) return; item(); gap(); if (!eat(/,/y)) { gap(); must(close); return; } } };
+  const value = () => {
+    const quoted = string();
+    if (quoted !== undefined) return quoted;
+    if (eat(/\[/y)) { const list = []; sequence(/\]/y, () => list.push(value())); return list; }
+    if (eat(/\{/y)) { const inline = table(); sequence(/\}/y, () => assign(inline, key())); return inline; }
+    const word = must(/[^\s,\]}#"']+/y)[0];
+    return word === 'true' || word === 'false' ? word === 'true'
+      : /^[+-]?\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d[\d_]*)?$/.test(word) ? Number(word.replace(/_/g, '')) : null;
+  };
+  const root = table();
+  let current = root;
+  for (;;) {
+    gap();
+    if (at >= text.length) return root;
+    if (eat(/\[\[/y)) {
+      const path = key(); must(/\]\]/y);
+      const parent = walk(root, path.slice(0, -1));
+      if (!Object.hasOwn(parent, path.at(-1))) parent[path.at(-1)] = [];
+      if (!Array.isArray(parent[path.at(-1)])) fail();
+      parent[path.at(-1)].push(current = table());
+    } else if (eat(/\[/y)) { const path = key(); must(/\]/y); current = walk(root, path); } else assign(current, key());
+    space(); eat(/#[^\n]*/y);
+    if (at < text.length) must(/\r?\n/y);
+  }
+}
+
+// A Codex role session never loads config.toml, whose MCP servers, apps, hooks and project trust would run beside the CLI,
+// outside the sandbox. It inherits only the model settings, the selected provider's definition and where the login is
+// stored, passed explicitly. A profile or provider that sets anything else cannot be honoured safely, so the phase refuses.
+const MODEL_SETTING = /^model(?:_(?!providers$)[a-z_]+)?$/;
+// A provider's literal `http_headers` or bearer token would put a credential on the command line, so neither is passed.
+const PROVIDER_SETTINGS = new Set(['name', 'base_url', 'env_key', 'env_key_instructions', 'wire_api', 'query_params', 'env_http_headers',
+  'requires_openai_auth', 'request_max_retries', 'stream_max_retries', 'stream_idle_timeout_ms']);
+const plain = (value) => ['string', 'number', 'boolean'].includes(typeof value) || (isTable(value) && Object.values(value).every(plain));
+
+function codexSettings(home, request) {
+  const path = join(home, 'config.toml');
+  let config;
+  try { config = existsSync(path) ? readToml(readFileSync(path, 'utf8')) : {}; } catch (error) {
+    return { blocker: `codex-config: ${path} cannot be read (${error.message}), so its model settings cannot be honoured` }; }
+  const name = request.profile ?? config.profile;
+  const profile = name === undefined ? {} : config.profiles?.[name];
+  if (!isTable(profile)) return { blocker: `codex-profile: ${JSON.stringify(name)} is not a profile in ${path}` };
+  const extra = Object.keys(profile).filter((key) => !MODEL_SETTING.test(key));
+  if (extra.length) return { blocker: `codex-profile: ${name} also sets ${extra.join(', ')}; a role session honours only model settings` };
+  const settings = { ...Object.fromEntries(Object.entries(config).filter(([key]) => MODEL_SETTING.test(key) || key === 'cli_auth_credentials_store')),
+    ...profile };
+  if (request.model) delete settings.model;
+  if (request.effort) delete settings.model_reasoning_effort;
+  const provider = settings.model_provider;
+  const definition = typeof provider === 'string' ? config.model_providers?.[provider] : undefined;
+  if (definition !== undefined) {
+    const unsafe = isTable(definition) ? Object.keys(definition).filter((key) => !PROVIDER_SETTINGS.has(key)) : ['its definition'];
+    if (unsafe.length || !/^[A-Za-z0-9_-]+$/.test(provider)) {
+      return { blocker: `codex-provider: ${provider} sets ${unsafe.join(', ') || 'an unquotable name'}, which a role session does not pass on` }; }
+    settings[`model_providers.${provider}`] = definition;
+  }
+  const unreadable = Object.keys(settings).filter((key) => !plain(settings[key]));
+  if (unreadable.length) return { blocker: `codex-config: ${unreadable.join(', ')} in ${path} cannot be passed on as a literal value` };
+  return { settings };
+}
+
+// Provider credentials stay in the installed CLI's own process; model-directed tools reach only the bounded worker. Optional
+// model/effort arguments, and a Codex profile's model settings, select existing capabilities without copying configuration.
+function launchCommand(request, bounds, settings = {}) {
   const write = request.role === 'writer';
   if (request.provider === 'claude') {
     // Bash is the only tool, and the trusted shell prefix runs every command in bounded-shell.sh. Native file tools would
@@ -129,13 +219,13 @@ function launchCommand(request, bounds) {
   const filesystem = { ':minimal': 'read', ...Object.fromEntries(bounds.read.map((dir) => [dir, 'read'])),
     ':workspace_roots': write ? 'write' : 'read', [bounds.scratch]: 'write', ...Object.fromEntries(bounds.git.map((dir) => [dir, 'read'])) };
   return { command: 'codex', env: {}, args: ['exec', '--color', 'never', '-C', request.worktree,
-    ...(request.profile ? ['--profile', request.profile] : []), ...(request.model ? ['-m', request.model] : []),
-    ...(request.effort ? ['-c', `model_reasoning_effort="${request.effort}"`] : []),
+    // As in the GitHub pipeline: no user configuration or rules load, so no configured integration starts (see codexSettings).
+    '--ignore-user-config', '--ignore-rules', ...Object.entries(settings).flatMap(([key, value]) => ['-c', `${key}=${toml(value)}`]),
+    ...(request.model ? ['-m', request.model] : []), ...(request.effort ? ['-c', `model_reasoning_effort="${request.effort}"`] : []),
     '-c', 'default_permissions="bounded"', '-c', `permissions.bounded.filesystem=${toml(filesystem)}`,
     '-c', 'permissions.bounded.network.enabled=false', '-c', 'shell_environment_policy.inherit="none"',
     '-c', `shell_environment_policy.set=${toml({ PATH: bounds.path, LANG: 'C.UTF-8', HOME: bounds.scratch, TMPDIR: bounds.scratch })}`,
-    // Configured MCP servers run beside the CLI, outside the sandbox, so none is started.
-    '-c', 'approval_policy="never"', '-c', 'mcp_servers={}', '--ephemeral', '-'] };
+    '-c', 'approval_policy="never"', '--ephemeral', '-'] };
 }
 
 // Codex prints its session header between the first two dashed lines on stderr; anything
@@ -248,6 +338,8 @@ async function runPhase(request) {
   }
   // The bounded worker is built on Linux namespaces, bubblewrap for Claude and Codex's Linux sandbox; elsewhere no role runs.
   if (process.platform !== 'linux') record.blockers.push(`bounded-tools: role tools run only in the Linux bounded worker, not on ${process.platform}`);
+  const codex = route.cli === 'codex' ? codexSettings(env.CODEX_HOME || join(env.HOME || homedir(), '.codex'), request) : {};
+  if (codex.blocker) record.blockers.push(codex.blocker);
   if (!record.blockers.length && request.role === 'writer') record.permissions = await writerPermissions(request, probeSeconds);
   if (record.permissions?.edit === 'not-writable') record.blockers.push('writer-permission: the worktree is not writable, so the phase could produce no change');
   if (timeouts.length || record.blockers.length) return finish('refused');
@@ -259,7 +351,7 @@ async function runPhase(request) {
   scratch = mkdtempSync(join(tmpdir(), 'dev-review-pr-'));
   const gitDirs = await git(request.worktree, ['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir'], probeSeconds);
   const bounds = { scratch, path: env.PATH ?? '', read: toolchainDirs(env.PATH ?? '', process.env), git: [...new Set((gitDirs ?? '').split('\n').filter(Boolean))] };
-  const { command, args, env: workerEnv } = launchCommand(request, bounds);
+  const { command, args, env: workerEnv } = launchCommand(request, bounds, codex.settings);
   const phaseEnv = { ...env, ...workerEnv };
   if (route.cli === 'claude') {
     const probe = await runBounded(BOUNDED_SHELL, ['true'], { cwd: request.worktree, env: phaseEnv, timeoutSeconds: probeSeconds, label: 'bounded-shell probe' });

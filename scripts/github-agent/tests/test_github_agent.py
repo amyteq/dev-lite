@@ -11,7 +11,9 @@ pull request request should be reviewed or fixed on.
 
 from __future__ import annotations
 
+import itertools
 import os
+import re
 import sys
 import unittest
 
@@ -228,9 +230,11 @@ class TestCredentialShapedVariables(unittest.TestCase):
         )
 
     def test_leading_whitespace_is_refused_like_the_workflow_gate(self):
-        for padding in (" ", "\n", "\t", "\r\n  "):
+        # Unicode padding too: `AgentConfig.get` strips it, so the value would be consumed as the credential.
+        for padding in (" ", "\n", "\t", "\r\n  ", " ", " 　 "):
             with self.subTest(padding=repr(padding)):
                 self.assertEqual(credential_shaped_variables({"X_ACTION_EXTRA": padding + "sk-" + "proj-abc"}), ["X_ACTION_EXTRA"])
+                self.assertEqual(credential_shaped_variables({"X_ACTION_EXTRA": padding + '{"id_' + 'token": "t"}'}), ["X_ACTION_EXTRA"])
 
     def test_ordinary_configuration_is_not_flagged(self):
         self.assertEqual(
@@ -601,6 +605,12 @@ class TestCheckoutResolution(unittest.TestCase):
         "- Example:\n  ```\n  @claude fix the spelling\n  ```",
         "1. ```text\n   @claude fix the spelling\n   ```",
         "- ~~~\n  @claude fix\n  ~~~",
+        # F005 round 4: a backtick that delimits nothing (escaped, in an earlier paragraph, inside an HTML tag or
+        # another table cell) must not close the real opener of the span holding the example.
+        "Escape a backtick as \\` in prose, then wrap the example in `\n@claude fix the spelling\n` like this.",
+        "A stray ` here.\n\n`example:\n@claude fix the spelling\n`",
+        '<span title="`"> ` @claude fix the spelling `</span>',
+        "| a | b |\n| - | - |\n| `x | ` @claude fix the spelling ` |",
     )
 
     def test_a_quoted_write_command_never_makes_the_branch_writable(self):
@@ -629,9 +639,24 @@ class TestCheckoutResolution(unittest.TestCase):
                     self.assertTrue(self.resolve(surface, "fix", number=number, agent=agent)["writable"])
 
     def test_closed_code_before_the_mention_keeps_a_fix_writable(self):
-        for text in ("See `a.py` and ``b`c``. @claude fix it", "Plain text.\n\n@claude fix it"):
+        for text in ("See `a.py` and ``b`c``. @claude fix it", "Plain text.\n\n@claude fix it",
+                     "Cells | `a` | and <b>`c`</b>: @claude fix it"):
             with self.subTest(text=text):
                 self.assertTrue(self.resolve("pull_request", "fix", text=text)["writable"])
+
+    def test_the_open_code_check_only_adds_read_only_cases_to_the_round_3_counter(self):
+        def round_3_open(before):
+            open_run = None
+            for run in re.findall(r"`+", before):
+                open_run = None if run == open_run else open_run or run
+            return open_run is not None
+
+        for length in range(1, 6):
+            for chars in itertools.product("`\\a\n|>", repeat=length):
+                before = "".join(chars) + " "
+                text = before + "@claude fix it"
+                if find_mention(text, "@claude") == len(before) and round_3_open(before):
+                    self.assertTrue(agent_lib.code_may_be_open_at_mention(text, "@claude"), repr(before))
 
     def test_mentions_naming_different_commands_run_read_only(self):
         context = self.resolve("pull_request", "fix", text="@claude fix the typo, then @claude review it")
