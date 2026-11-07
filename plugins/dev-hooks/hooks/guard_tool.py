@@ -113,8 +113,8 @@ INTERPRETERS = {
 }
 
 # A word in command position: start, or after a pipe/separator/substitution,
-# optionally preceded by VAR=value assignments.
-COMMAND_POSITION = re.compile(r"(?:^|[|;&\n(]|`)\s*(?:\w+=\S+\s+)*(?P<program>[\w./-]+)")
+# optionally preceded by VAR=value assignments; quotes and backslashes around it do not hide it.
+COMMAND_POSITION = re.compile(r"(?:^|[|;&\n(]|`)\s*(?:\w+=\S+\s+)*[\"'\\]*(?P<program>[\w./-]+)")
 
 # The literal value of a message-carrying flag. Single quotes never expand; double
 # quotes count only without `$`, backtick or backslash, so a payload that could
@@ -132,6 +132,7 @@ def mentions_interpreter(command: str) -> bool:
 # anything else (psql, ssh, docker exec, ...) may be executed, so it stays in scope.
 DATA_SINKS = {"cat", "tee", "gh", "git"}
 EXPANDABLE = re.compile(r"[$`\\]")
+PLAIN_ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=[\w./:-]*")
 
 
 def strip_heredoc_bodies(command: str) -> str:
@@ -159,10 +160,13 @@ def strip_heredoc_bodies(command: str) -> str:
         while end < len(lines) and lines[end].strip() != tag:
             end += 1
         body = lines[index:end]
-        # The body reaches every program of the opener's pipeline, so each must only store or forward it.
+        # The body reaches every program of the opener's pipeline, so each stage, including a
+        # substitution, must start with a data sink spelled literally. A quoted, escaped, expanded
+        # or otherwise unrecognised program is not identified, so the body stays in scope.
         pipeline = [part for part in re.split(r"&&|\|\||;|(?<![|>])&(?!>)", line) if opener.group(0) in part][0]
-        programs = [Path(match.group("program")).name for match in COMMAND_POSITION.finditer(pipeline)]
-        sink = bool(programs) and set(programs) <= DATA_SINKS and not line.rstrip().endswith(("|", "\\"))
+        stages = [stage.split() for stage in re.split(r"[|(`]", pipeline) if stage.strip()]
+        sink = all(next((word for word in words if not PLAIN_ASSIGNMENT.fullmatch(word)), "") in DATA_SINKS
+                   for words in stages) and not line.rstrip().endswith(("|", "\\"))
         literal = bool(opener.group("quote")) or not EXPANDABLE.search("\n".join(body))
         if not (sink and literal):
             kept.extend(body)
@@ -278,8 +282,9 @@ def push_decision(command: str) -> tuple[str | None, str | None]:
                     force |= letter == "f"
                     delete |= letter == "d"
         # The repository is positional only without `--repo`; no remote name starts with `+` or `:`.
+        # A bare `:` is Git's matching refspec, which pushes existing branches and deletes none.
         force |= any(word.startswith("+") for word in positional)
-        delete |= any(word.startswith(":") for word in positional)
+        delete |= any(word.startswith(":") and word != ":" for word in positional)
         if force:
             return "deny", "Refusing force push."
         if delete:
@@ -315,7 +320,8 @@ def rm_targets_only_temp(command: str) -> bool:
             return False
         for target in targets:
             prefix = TMPDIR_PREFIX.match(target)
-            if prefix and (len(roots) < 2 or redefined):
+            # An unquoted $TMPDIR holding whitespace or a glob character splits or expands into other paths.
+            if prefix and (len(roots) < 2 or redefined or re.search(r"[\s*?\[]", roots[-1])):
                 return False  # $TMPDIR is empty, unusable or not the hook's value
             path = (roots[-1] + "/" + target[prefix.end():] if prefix else target).rstrip("/")
             if ".." in target or "$" in path or "~" in target[:1] or \
@@ -333,7 +339,8 @@ READ_PROGRAMS = {"cat", "less", "more", "head", "tail", "grep", "rg", "awk", "se
 def operand_forms(word: str) -> set[str]:
     forms = {word, word.split("=", 1)[-1], word.split(":", 1)[-1], word.rsplit("@", 1)[-1], word.lstrip("@<")}
     if word.startswith("-") and not word.startswith("--"):
-        forms |= {word[2:], word[2:].lstrip("@<")}
+        # Bundled short options (`-sT.env.production`) can attach the value after any letter.
+        forms |= {form for start in range(2, len(word)) for form in (word[start:], word[start:].lstrip("@<"))}
     return {form for form in forms if form}
 
 
@@ -391,6 +398,11 @@ ASK_PATTERNS = [
 
 # Words whose command the structural rules must read; unreadable quoting around one asks.
 STRUCTURAL_WORDS = re.compile(r"\b(?:push|rm|curl|wget|scp|rsync|sftp|cat|less|more|head|tail|grep|rg|awk|sed|xxd|od|strings|base64)\b")
+# Shell text these rules cannot resolve: a command or process substitution, whose output becomes
+# words or a program, and a variable or substitution in command position.
+UNRESOLVED = re.compile(r"\$\(|`|[<>]\(|(?:^|[|;&\n(])\s*(?:\w+=\S*\s+)*[\"'\\]*\$")
+# The one closed literal form allowed through: `$(cat <<'TAG'` with its body already removed as data.
+LITERAL_SUBSTITUTION = re.compile(r"\$\(cat <<-?\s*'(?P<tag>[A-Za-z_]\w*)'\n\s*(?P=tag)\n\s*\)")
 
 
 def bash_decision(command: str) -> tuple[str | None, str | None]:
@@ -414,6 +426,8 @@ def bash_decision(command: str) -> tuple[str | None, str | None]:
         if STRUCTURAL_WORDS.search(lc):
             return "ask", "This command's quoting cannot be read safely; split or simplify it."
         removes_outside_temp = False
+    if STRUCTURAL_WORDS.search(lc) and UNRESOLVED.search(LITERAL_SUBSTITUTION.sub(" ", text)):
+        return "ask", "A substitution or variable decides what this command runs or reads; spell it out literally."
     if removes_outside_temp:
         return "ask", "File deletion outside /tmp or $TMPDIR requires approval."
     for pattern, reason in ASK_PATTERNS:

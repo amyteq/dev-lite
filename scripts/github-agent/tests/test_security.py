@@ -5,6 +5,7 @@ import json
 import os
 import re
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -260,6 +261,32 @@ class Publication(unittest.TestCase):
                 self.git('reset', '-q', '--hard', self.sha)
                 self.git('clean', '-qfdx')
 
+    def test_a_credential_in_a_path_context_or_removed_line_is_refused_at_collection_and_publication(self):
+        token = 'gh' + 'p_' + 'B' * 36
+        Path(self.work, 'kept.txt').write_text(f'{token}\nline\n')
+        self.git('add', '-A')
+        self.git('commit', '-qm', 'synthetic committed value')
+        self.sha = self.git('rev-parse', 'HEAD').decode().strip()
+        for change in ['path', 'context', 'removed']:
+            with self.subTest(change=change):
+                if change == 'path':
+                    data = self.changed_patch(f'{token}.txt', 'harmless\n')
+                elif change == 'context':
+                    data = self.changed_patch('kept.txt', f'{token}\nline changed\n')
+                else:
+                    data = self.changed_patch('kept.txt', 'line\n')
+                self.assertNotRegex(b'\n'.join(l for l in data.splitlines() if l.startswith(b'+') and not l.startswith(b'+++')),
+                                    token.encode())
+                with self.assertRaisesRegex(ValueError, 'credential'):
+                    publish_changes.validate_patch(self.work, data)
+                with self.assertRaisesRegex(ValueError, 'credential'):
+                    publish_changes.check_patch_content(data)
+        Path(self.work, f'{token}.txt').write_text('harmless\n')
+        with tempfile.TemporaryDirectory() as output:
+            with self.assertRaisesRegex(ValueError, 'credential'):
+                self.collect(output)
+            self.assertFalse(Path(output, 'changes.patch').exists())
+
     def collect(self, output, writable=True):
         with patch.dict(os.environ, {'WORK_DIR': self.work, 'PATCH_FILE': str(Path(output, 'changes.patch')),
                                      'RESULT_FILE': str(Path(output, 'result.md'))}), \
@@ -404,25 +431,111 @@ class WorkflowGates(unittest.TestCase):
         for key in _CREDENTIAL_JSON_KEYS:
             self.assertIn(f"{key.split('_')[-1]}\\\"')", gate)
 
+    def test_the_gate_catches_every_value_the_routing_step_recognises(self):
+        from agent_lib import credential_shaped_variables
+        gate = workflow_step('Stop before rendering a credential-shaped variable')
+        needles = [literal.replace("''", "'") for literal in re.findall(r"contains\(toJSON\(vars\), '((?:[^']|'')*)'\)", gate)]
+        fake = 'sk-' + 'proj-' + 'x' * 24
+        values = ['configured-model', '', fake, ' ' + fake, '\n' + fake, '\t' + fake, '\r\n' + fake, '\x0b' + fake,
+                  '{"tokens": {"refresh_' + 'token": "r"}}', ' {"access_' + 'token": "a"}', 'high', 'Bash(gh pr:*)']
+        for value in values:
+            with self.subTest(value=repr(value)):
+                # Actions renders `toJSON(vars)` as indented JSON without escaping non-ASCII text.
+                rendered = json.dumps({'CLAUDE_ACTION_MODEL': value, 'UNRELATED': 'x'}, indent=2, ensure_ascii=False).lower()
+                stops = any(needle.lower() in rendered for needle in needles)
+                if credential_shaped_variables({'CLAUDE_ACTION_MODEL': value}):
+                    self.assertTrue(stops, 'the routing step would render a value it then refuses')
+                if value in ('configured-model', '', 'high', 'Bash(gh pr:*)'):
+                    self.assertFalse(stops)
+
+    def test_debug_logging_stops_before_any_job_evaluates_a_variable(self):
+        first_vars = WORKFLOW.index('vars')
+        gate_job = WORKFLOW.index('  debug-gate:\n')
+        self.assertLess(gate_job, first_vars)
+        self.assertIn('needs: debug-gate', WORKFLOW[gate_job:WORKFLOW.index('  execute:\n')])
+        prepare = WORKFLOW[WORKFLOW.index('  prepare:\n'):WORKFLOW.index('  execute:\n')]
+        self.assertLess(prepare.index("if: runner.debug == '1'"), prepare.index('vars'))
+
     def test_only_a_successful_collection_is_uploaded(self):
         self.assertIn("if: always() && steps.collect.outcome == 'success'", workflow_step('Save bounded agent output'))
         self.assertIn('id: collect', workflow_step('Collect changes as untrusted patch data'))
 
-    def test_the_credentialed_step_gets_only_its_own_secret_and_no_command_tools(self):
-        claude, _, _ = run_agent.claude_command(AgentConfig('claude', {}), writable=True)
-        self.assertEqual(claude[claude.index('--tools') + 1], 'Read,Glob,Grep,Edit,Write')
-        self.assertEqual(claude[claude.index('--permission-mode') + 1], 'acceptEdits')
-        self.assertEqual(claude[claude.index('--disallowedTools') + 1], 'Read(//proc/**)')
+    def test_the_credentialed_step_gets_only_its_own_secret_and_tools_only_in_the_bounded_worker(self):
+        claude, env, _ = run_agent.claude_command(AgentConfig('claude', {}), True, BOUNDS)
+        self.assertEqual([claude[claude.index(flag) + 1] for flag in ('--tools', '--allowedTools', '--permission-mode')],
+                         ['Bash', 'Bash', 'dontAsk'])
+        self.assertEqual((env['CLAUDE_CODE_SHELL_PREFIX'], env['BOUNDED_MODE'], env['BOUNDED_GIT']),
+                         (str(run_agent.BOUNDED_SHELL), 'write', '/work/repo/.git'))
+        self.assertTrue(run_agent.BOUNDED_SHELL.is_file())
         self.assertNotIn('--dangerously-skip-permissions', claude)
-        narrowed, _, _ = run_agent.claude_command(AgentConfig('claude', {'CLAUDE_ACTION_ALLOWED_TOOLS': 'Bash,Edit,Read'}), True)
-        self.assertEqual(narrowed[narrowed.index('--tools') + 1], 'Read,Edit')
-        read_only, _, _ = run_agent.claude_command(AgentConfig('claude', {}))
-        self.assertEqual(read_only[read_only.index('--tools') + 1], 'Read,Glob,Grep')
-        self.assertEqual(read_only[read_only.index('--permission-mode') + 1], 'dontAsk')
-        with patch.dict(os.environ, {'OPENAI_API_KEY': 'test-placeholder'}, clear=True), redirect_stdout(io.StringIO()):
-            codex, _, _ = run_agent.codex_command(AgentConfig('codex', {'CODEX_ACTION_SANDBOX': 'danger-full-access'}), '/tmp/r.md')
-        self.assertEqual(codex[codex.index('--sandbox') + 1], 'read-only')
-        self.assertFalse(any('danger' in arg or 'network_access' in arg for arg in codex))
+        narrowed, _, _ = run_agent.claude_command(AgentConfig('claude', {'CLAUDE_ACTION_ALLOWED_TOOLS': 'Edit,Read'}), True, BOUNDS)
+        self.assertEqual(narrowed[narrowed.index('--tools') + 1], '', 'narrowing never adds a tool')
+        self.assertEqual(run_agent.claude_command(AgentConfig('claude', {}), False, BOUNDS)[1]['BOUNDED_MODE'], 'read')
+        for writable, grant in ((False, 'read'), (True, 'write')):
+            with patch.dict(os.environ, {'OPENAI_API_KEY': 'test-placeholder'}, clear=True), redirect_stdout(io.StringIO()):
+                codex, _, _ = run_agent.codex_command(AgentConfig('codex', {'CODEX_ACTION_SANDBOX': 'danger-full-access'}), '/tmp/r.md',
+                                                      BOUNDS, writable)
+            self.assertNotIn('--sandbox', codex)
+            self.assertFalse(any('danger' in arg or 'network_access' in arg for arg in codex))
+            for pair in ('default_permissions="bounded"', 'permissions.bounded.network.enabled=false',
+                         'shell_environment_policy.inherit="none"', 'approval_policy="never"'):
+                self.assertIn(pair, codex)
+            filesystem = next(arg for arg in codex if arg.startswith('permissions.bounded.filesystem='))
+            self.assertIn(f'":workspace_roots"="{grant}"', filesystem)
+            self.assertIn('"/work/repo/.git"="read"', filesystem)
+            self.assertIn('"/opt/tool"="read"', filesystem)
+
+    def test_toolchain_mounts_exclude_home_and_login_locations(self):
+        with tempfile.TemporaryDirectory() as root:
+            for folder in ('home/.local/bin', 'home/.nvm/v1/bin', 'temp/login/bin', 'opt/tool/bin'):
+                Path(root, folder).mkdir(parents=True)
+            path = ':'.join(str(Path(root, folder)) for folder in ('home/.local/bin', 'home/.nvm/v1/bin', 'temp/login/bin', 'opt/tool/bin', 'home'))
+            dirs = run_agent.toolchain_dirs(path + ':relative/bin', str(Path(root, 'home')), (str(Path(root, 'temp')),))
+            real = os.path.realpath(root)
+            self.assertEqual(sorted(dirs), sorted(f'{real}/{folder}' for folder in ('home/.local/bin', 'home/.nvm/v1/bin', 'home/.nvm/v1',
+                                                                                     'opt/tool/bin', 'opt/tool')))
+
+    def test_execute_job_checks_out_the_worker_shell_and_prepares_namespaces_before_credentials(self):
+        execute = WORKFLOW[WORKFLOW.index('  execute:\n'):WORKFLOW.index('  publish:\n')]
+        self.assertIn('plugins/dev-skills/skills/dev-review-pr/scripts', execute)
+        self.assertLess(execute.index('bubblewrap'), execute.index('CLAUDE_CODE_OAUTH_TOKEN'))
+
+
+# A synthetic worker description: no path in it is read by the command builders.
+BOUNDS = {'scratch': '/scratch', 'path': '/usr/bin:/opt/tool/bin', 'git': ['/work/repo/.git'], 'work_dir': '/work/repo',
+          'read': ['/opt/tool/bin', '/opt/tool']}
+
+
+class BoundedWorker(unittest.TestCase):
+    """The real worker shell with synthetic markers; skipped where bubblewrap or user namespaces are unavailable."""
+
+    def test_a_synthetic_credential_and_environment_marker_stay_outside_while_edit_diff_and_check_work(self):
+        if subprocess.run(['bwrap', '--unshare-all', '--ro-bind', '/', '/', 'true'], capture_output=True).returncode if shutil.which('bwrap') else 1:
+            self.skipTest('bubblewrap or user namespaces unavailable')
+        with tempfile.TemporaryDirectory() as root:
+            work, login = Path(root, 'repo'), Path(root, 'temp')
+            work.mkdir()
+            login.mkdir()
+            Path(login, 'auth.json').write_text('{"synthetic": "LOGIN-MARKER-5b7a"}')
+            subprocess.run(['git', 'init', '-q', str(work)], check=True)
+            Path(work, 'app.txt').write_text('before\n')
+            subprocess.run(['git', '-C', str(work), 'add', '.'], check=True)
+            subprocess.run(['git', '-C', str(work), '-c', 'user.name=T', '-c', 'user.email=t@example.invalid', 'commit', '-qm', 'x'], check=True)
+            with patch.dict(os.environ, {'RUNNER_TEMP': str(login), 'HOME': str(Path(root, 'home')), 'SYNTHETIC_PROVIDER_TOKEN': 'ENV-MARKER-3c9f'}):
+                bounds = run_agent.worker_bounds(str(work))
+                _, env, _ = run_agent.claude_command(AgentConfig('claude', {}), True, bounds)
+                run_agent.probe_worker(env)
+                shell = lambda command: subprocess.run([env['CLAUDE_CODE_SHELL_PREFIX'], command], cwd=work, capture_output=True, text=True,  # noqa: E731
+                                                       env={**os.environ, **env})
+                seen = shell(f'cat {login}/auth.json; env; cat /proc/*/environ; echo after > app.txt; git diff --stat; '
+                             'test "$(cat app.txt)" = after && echo CHECKED')
+            self.assertNotIn('LOGIN-MARKER-5b7a', seen.stdout + seen.stderr)
+            self.assertNotIn('ENV-MARKER-3c9f', seen.stdout + seen.stderr)
+            self.assertIn('app.txt | 2 +-', seen.stdout)
+            self.assertIn('CHECKED', seen.stdout)
+            self.assertNotEqual(shell('echo x > .git/planted').returncode, 0)
+            self.assertFalse(Path(work, '.git/planted').exists())
+            shutil.rmtree(bounds['scratch'], ignore_errors=True)
 
 
 class LaunchBoundary(unittest.TestCase):
@@ -440,7 +553,7 @@ class LaunchBoundary(unittest.TestCase):
                 'RUNNER_TEMP': folder, 'OPENAI_API_KEY': 'test-placeholder',
                 'CODEX_API_KEY': 'unselected-inherited-key'}, clear=True), \
              patch.object(run_agent.subprocess, 'Popen') as popen, redirect_stdout(io.StringIO()):
-            argv, selected, capture = run_agent.codex_command(AgentConfig('codex', {}), str(Path(folder, 'result.md')))
+            argv, selected, capture = run_agent.codex_command(AgentConfig('codex', {}), str(Path(folder, 'result.md')), BOUNDS)
             run_agent.launch(argv, selected, folder, capture)
             child = popen.call_args.kwargs['env']
             self.assertEqual(child['CODEX_API_KEY'], 'test-placeholder')
@@ -453,7 +566,7 @@ class LaunchBoundary(unittest.TestCase):
                 'OPENAI_API_KEY': 'unselected-secret', 'CODEX_API_KEY': 'unselected-inherited-key',
                 'CLAUDE_CODE_OAUTH_TOKEN': 'unselected-provider'}, clear=True), \
              patch.object(run_agent.subprocess, 'Popen') as popen, redirect_stdout(io.StringIO()):
-            argv, selected, capture = run_agent.codex_command(AgentConfig('codex', {}), str(Path(folder, 'result.md')))
+            argv, selected, capture = run_agent.codex_command(AgentConfig('codex', {}), str(Path(folder, 'result.md')), BOUNDS)
             run_agent.launch(argv, selected, folder, capture)
             child = popen.call_args.kwargs['env']
             for name in ['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_AUTH_JSON', 'CLAUDE_CODE_OAUTH_TOKEN']:
@@ -482,8 +595,8 @@ class LaunchBoundary(unittest.TestCase):
         # A single argument over the kernel's per-argument limit fails with E2BIG before launch.
         prompt = 'x' * 300_000
         with patch.dict(os.environ, {'OPENAI_API_KEY': 'test-placeholder'}, clear=True), redirect_stdout(io.StringIO()):
-            codex = run_agent.codex_command(AgentConfig('codex', {}), '/tmp/result.md')[0]
-        claude = run_agent.claude_command(AgentConfig('claude', {}))[0]
+            codex = run_agent.codex_command(AgentConfig('codex', {}), '/tmp/result.md', BOUNDS)[0]
+        claude = run_agent.claude_command(AgentConfig('claude', {}), False, BOUNDS)[0]
         self.assertEqual(codex[-1], '-')
         self.assertLess(max(len(arg) for arg in claude + codex), 1000)
         process = subprocess.Popen([sys.executable, '-c', 'import sys; print(len(sys.stdin.read()))'],

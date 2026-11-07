@@ -97,13 +97,18 @@ cases('several eligible marker issues stop for a human in any order', [
 cases('a marker copied by an author without write access is never selected', [
   ...['read', 'triage', 'none', null, ' Read '].map((p) => [`a newer copy by ${String(p)}`,
     can({ candidates: [marked(10), marked(20, { authorPermission: p })] }),
-    { action: 'reuse', code: 'REUSE_MARKED', selected: 10, duplicates: [20], writes: REUSE, reason: ['#20'] }]),
+    { action: 'stop', code: 'MARKER_PROVENANCE_UNCERTAIN', conflicts: [10, 20], writes: NONE, reason: ['#10, #20', 'original=<number>'] }]),
   ['the only marker issue lacks a writer: stop, naming it', can({ candidates: [marked(20, { authorPermission: 'read' })] }),
     { code: 'MARKER_PROVENANCE_UNCERTAIN', conflicts: [20], reason: ['#20', 'original=<number>'] }],
   ['the only marker issue lacks a writer, without authority', input({ candidates: [marked(20, { authorPermission: 'triage' })] }),
     { code: 'MARKER_PROVENANCE_UNCERTAIN', conflicts: [20] }],
   ['one eligible beside two copies', can({ candidates: [marked(30, { authorPermission: 'none' }), marked(5, { authorPermission: 'Admin' }), marked(9, { authorPermission: 'read' })] }),
-    { selected: 5, duplicates: [9, 30] }],
+    { code: 'MARKER_PROVENANCE_UNCERTAIN', conflicts: [5, 9, 30], writes: NONE }],
+  // F023 round 3: the same original beside a current writer's copy; only a maintainer's `original=<N>` resumes.
+  ['a former writer\'s original beside a current writer\'s copy', can({ candidates: [marked(10, { authorPermission: null }), marked(20)] }),
+    { action: 'stop', code: 'MARKER_PROVENANCE_UNCERTAIN', conflicts: [10, 20], writes: NONE, reason: ['#10, #20'] }],
+  ['the same mixture, with the original named', can({ candidates: [marked(10, { authorPermission: null }), marked(20)], selection: { story: KEY, issue: 10 } }),
+    { action: 'reuse', code: 'REUSE_SELECTED', selected: 10, duplicates: [20], writes: REUSE }],
 ]);
 
 // F023: a genuine author who lost write access, or whose account is gone, cannot be told from a copier.
@@ -159,7 +164,7 @@ cases('an open marker issue without fetched provenance stops', [
 
 cases('a locked selected issue stops', [
   ['the only marker issue locked', can({ candidates: [marked(10, { locked: true })] }), { code: 'ISSUE_LOCKED', conflicts: [10] }],
-  ['the eligible marker issue locked beside a copy', can({ candidates: [marked(10, { authorPermission: 'read' }), marked(20, { locked: true })] }), { code: 'ISSUE_LOCKED', conflicts: [20] }],
+  ['the eligible marker issue locked beside a copy', can({ candidates: [marked(10, { authorPermission: 'read' }), marked(20, { locked: true })], ...pick(20) }), { code: 'ISSUE_LOCKED', conflicts: [20] }],
 ]);
 
 const notTheStorys = [
@@ -300,7 +305,19 @@ check('no decision reads or reports readiness', () => {
 });
 
 check('a repeated invocation selects the same issue and creates nothing', () => {
-  const i = can({ candidates: [row(5), marked(10, { authorPermission: 'read' }), marked(20)] });
+  const i = can({ candidates: [row(5), marked(10), marked(20, { authorPermission: 'Write' })] });
+  const first = resolve(i);
+  for (let k = 0; k < 3; k++) assert.deepStrictEqual(resolve(structuredClone(i)), first);
+  assert.strictEqual(first.action, 'stop');
+  const named = can({ ...i, selection: { story: KEY, issue: 20 } });
+  const again = resolve(named);
+  for (let k = 0; k < 3; k++) assert.deepStrictEqual(resolve(structuredClone(named)), again);
+  assert.strictEqual(again.selected, 20);
+  assert.deepStrictEqual(again.plannedWrites, REUSE);
+});
+
+check('a repeated automatic invocation reuses the same eligible issue', () => {
+  const i = can({ candidates: [row(5), marked(20)] });
   const first = resolve(i);
   for (let k = 0; k < 3; k++) assert.deepStrictEqual(resolve(structuredClone(i)), first);
   assert.strictEqual(first.selected, 20);

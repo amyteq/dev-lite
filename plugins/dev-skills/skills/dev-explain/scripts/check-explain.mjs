@@ -203,10 +203,13 @@ export function verifyAppend({ before, planned, after }) {
 // The current branch's open PR: the one whose head is the repository and branch it publishes to, which
 // `git for-each-ref --format='%(push)'` and `%(push:remotename)` name. A pull upstream that differs, such
 // as an integration branch, never selects; nor does a push destination Git cannot name consistently.
+// The tracking ref names the remote branch only through the remote's fetch mapping, so anything but the
+// default mapping, a push refspec, a detached HEAD or more than one ref line is uncertain and selects nothing.
 const GITHUB_REMOTE = /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?\/?$/;
-export function branchCandidates({ push, remote, remoteUrl, pulls }) {
+export function branchCandidates({ branch: current, push, remote, fetch, pushSpecs, remoteUrl, pulls }) {
   const prefix = `refs/remotes/${remote}/`;
   const head = GITHUB_REMOTE.exec(remoteUrl.trim())?.[1]?.toLowerCase();
+  if (!current.trim() || /\n/.test(push.trim()) || fetch.trim() !== `+refs/heads/*:${prefix}*` || pushSpecs.trim()) return [];
   if (!remote || !head || !push.startsWith(prefix) || push.length === prefix.length) return [];
   const branch = push.slice(prefix.length);
   return [...new Set(pulls.filter((pull) => pull?.headRefName === branch
@@ -229,8 +232,11 @@ const SCHEMAS = {
     candidates: [(v) => Array.isArray(v) && v.every((n) => Number.isSafeInteger(n) && n > 0), 'an array of positive integers'],
   },
   branch: {
+    branch: [isString, 'the `git branch --show-current` output ("" when detached)'],
     push: [isString, 'the %(push) ref ("" when none)'],
     remote: [isString, 'the %(push:remotename) ("" when none)'],
+    fetch: [isString, 'the remote\'s `remote.REMOTE.fetch` values ("" when none)'],
+    pushSpecs: [isString, 'the remote\'s `remote.REMOTE.push` values ("" when none)'],
     remoteUrl: [isString, 'the push remote URL ("" when none)'],
     pulls: [(v) => Array.isArray(v), 'the gh pr list array'],
   },

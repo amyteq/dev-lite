@@ -29,6 +29,7 @@ from agent_lib import (  # noqa: E402
     WRITE_COMMANDS,
     AgentConfig,
     branch_list,
+    code_may_be_open_at_mention,
     credential_shaped_variables,
     find_mention,
     gh_rest,
@@ -286,12 +287,14 @@ def resolve_checkout(
 
     Code masking is a best guess, so a quoted example it misses could select the
     command. The branch is therefore writable only when every mention in the raw
-    text, code included, names the selected command.
+    text, code included, names the selected command, and no code can still be open
+    where the selected mention starts. Both agents' commands run in an isolated
+    worker (run_agent.py), so the agent no longer decides writability.
     """
     command = context["command"]
-    agreed = mention_commands(context["search_text"], context["mention"]) == {command}
-    # Codex executes commands in every mode, so it never holds its credential next to an edit of the checkout.
-    read_only = command not in WRITE_COMMANDS or not agreed or context.get("agent") != "claude"
+    agreed = mention_commands(context["search_text"], context["mention"]) == {command} \
+        and not code_may_be_open_at_mention(context["search_text"], context["mention"])
+    read_only = command not in WRITE_COMMANDS or not agreed
 
     if context["surface"] != "pull_request" or not context.get("number"):
         context["ref"] = base_branch

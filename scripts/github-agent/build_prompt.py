@@ -26,7 +26,6 @@ from agent_lib import (  # noqa: E402
     log,
     truncate,
     warn,
-    WRITE_COMMANDS,
 )
 
 # Per-command steering. An unknown or absent command falls through to the
@@ -196,10 +195,16 @@ def working_tree_notes(context: dict) -> str:
             f"This is pull request #{context['number']} at its captured revision of `{context['ref']}`. "
             f"Review it with `git diff origin/{context['base_ref']}...HEAD`; full history was fetched for this."
         )
+    # Both CLIs run every model-directed command in run_agent.py's bounded worker.
+    lines.append(
+        ("Use the shell for every read, diff, edit and check. " if context.get("agent") == "claude" else "")
+        + "Commands run in an isolated worker with the checkout, no network and no credentials, so "
+        "installing dependencies may fail; the draft pull request's CI runs the rest. Git metadata is read-only."
+    )
     if context.get("writable"):
         lines.append(
-            "Edit files locally and leave them uncommitted. You cannot run commands: this session holds the "
-            "agent credential, so checks run on the draft pull request instead; say which ones matter. A separate trusted "
+            "Edit files locally and leave them uncommitted, then run the relevant local checks that need no network. "
+            "A separate trusted "
             f"publisher will open a draft pull request against `{draft_pr_base(context)}` on a generated "
             "agent branch. Do not modify .github/, .gitmodules, credentials, or private package files. "
             "Never run git commit/push or create a pull request yourself."
@@ -213,11 +218,6 @@ def working_tree_notes(context: dict) -> str:
         lines.append(
             f"The head branch `{pull['head_ref']}` is protected, so this request is read-only. Describe "
             "any needed change in your reply; local changes will never be published."
-        )
-    elif context.get("agent") == "codex" and context.get("command") in WRITE_COMMANDS:
-        lines.append(
-            "Codex answers here but never edits, because it cannot work without running commands next to its "
-            "credential. Describe the change in your reply; local changes will never be published."
         )
     else:
         lines.append(

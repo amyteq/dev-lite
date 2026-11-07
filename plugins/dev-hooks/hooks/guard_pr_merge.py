@@ -18,9 +18,10 @@ Contract (Claude Code hooks):
 Override: set ALLOW_FOREIGN_MERGE=1 to bypass.
   The guard is ON by default: unset / empty / "0" / "false" keep it active.
   Any other value bypasses.
-A command with two merges, unreadable quoting around a merge, or a numbered or
-branch merge after a directory or repository change is blocked: name the PR by
-URL or `--repo`, one merge per command.
+A command with two merges, unreadable quoting around a merge, a `$` or backtick
+anywhere in a merge command, or a numbered or branch merge after a directory or
+repository change is blocked: name the PR literally, by URL or `--repo`, one
+merge per command.
 FAIL OPEN otherwise: a lookup or internal error exits 0 so the session is never bricked.
 """
 
@@ -131,6 +132,9 @@ def main():
         sys.exit(0)
     if len(found) > 1:
         block("Merge one PR per command, so each one's author is checked.")
+    if re.search(r"[$`]", cmd):
+        # An expansion or substitution can supply the PR, repository or directory that gh acts on.
+        block("Name the PR and repository literally: a `$` or backtick in this merge command decides its target.")
     [(selector, repo)] = found
     qualified = repo or re.match(r"https://github\.com/[^/\s]+/[^/\s]+/pull/\d+", selector or "")
     if not qualified and CONTEXT_CHANGE.search(cmd):

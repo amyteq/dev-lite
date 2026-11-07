@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
-import { accessSync, constants, createReadStream, existsSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute } from 'node:path';
+import { accessSync, constants, createReadStream, existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync,
+  writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // Launches one dev-review-pr phase on an explicitly selected route and writes its phase record.
@@ -77,23 +79,63 @@ const git = async (worktree, args, timeoutSeconds) => {
   const result = await runBounded('git', ['-C', worktree, ...args], { env: process.env, timeoutSeconds, label: `git ${args[0]}` });
   return result.code === 0 ? result.stdout.trim() : null; };
 
-// Keep credentials and provider setup in the installed CLI's normal configuration. Optional
-// model/effort/profile arguments select existing capabilities without copying machine configuration.
-function launchCommand(request) {
+// ---- The bounded worker: every model-directed read, edit and command runs apart from the logged-in CLI. ----
+
+export const BOUNDED_SHELL = fileURLToPath(new URL('./bounded-shell.sh', import.meta.url));
+const real = (path) => { try { return realpathSync(path); } catch { return null; } };
+const covers = (outer, inner) => outer === inner || inner.startsWith(`${outer}/`);
+
+// Read-only toolchain mounts: each absolute PATH directory and, for a `bin` directory deeper than a home subdirectory such
+// as ~/.local, its installation prefix. A directory that is or holds the home directory or a CLI login is never mounted.
+export function toolchainDirs(path, env) {
+  const home = real(env.HOME || homedir());
+  const logins = [real(env.CODEX_HOME || join(home ?? '/', '.codex')), real(env.CLAUDE_CONFIG_DIR || join(home ?? '/', '.claude'))].filter(Boolean);
+  const dirs = new Set();
+  for (const dir of path.split(':').filter(isAbsolute).map(real)) {
+    if (!dir || !statSync(dir).isDirectory()) continue;
+    const shallow = home && [dirname(dir), dirname(dirname(dir))].includes(home);
+    for (const candidate of basename(dir) === 'bin' && !shallow ? [dir, dirname(dir)] : [dir]) {
+      if (candidate !== '/' && ![home, ...logins].some((guarded) => guarded && covers(candidate, guarded))
+        && !logins.some((login) => covers(login, candidate))) dirs.add(candidate);
+    }
+  }
+  return [...dirs];
+}
+
+// The worktree's `.git` entry locates the repository every later Git command trusts, so a phase may not change it.
+const gitLink = (worktree) => { const path = join(worktree, '.git');
+  try { return lstatSync(path).isFile() ? readFileSync(path, 'utf8') : lstatSync(path).isDirectory() ? 'directory' : 'other'; } catch { return 'missing'; } };
+
+const toml = (table) => `{${Object.entries(table).map(([key, value]) => `${JSON.stringify(key)}=${JSON.stringify(value)}`).join(', ')}}`;
+
+// Provider credentials and setup stay in the installed CLI's own process and configuration; model-directed tools reach only
+// the bounded worker. Optional model/effort/profile arguments select existing capabilities without copying configuration.
+function launchCommand(request, bounds) {
+  const write = request.role === 'writer';
   if (request.provider === 'claude') {
-    // No role gets a shell: a check runs PR code, which could read the operator's login (references/agents.md).
-    const tools = request.role === 'reviewer' ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write';
-    return { command: 'claude', args: ['-p', ...(request.model ? ['--model', request.model] : []),
-      // `claude -p` starts in the default mode and denies writer edits unless a mode is passed; a plugin cannot rely on the
-      // consumer repository's settings to set one.
-      ...(request.effort ? ['--effort', request.effort] : []), '--permission-mode', 'acceptEdits', '--no-session-persistence',
+    // Bash is the only tool, and the trusted shell prefix runs every command in bounded-shell.sh. Native file tools would
+    // run inside the logged-in CLI, so none is offered: reads, diffs, edits and checks all go through the bounded shell.
+    return { command: 'claude', env: { CLAUDE_CODE_SHELL_PREFIX: BOUNDED_SHELL, BOUNDED_WORKTREE: request.worktree,
+      BOUNDED_MODE: write ? 'write' : 'read', BOUNDED_SCRATCH: bounds.scratch, BOUNDED_READ: bounds.read.join('\n'),
+      BOUNDED_GIT: bounds.git.join('\n'), BOUNDED_PATH: bounds.path, TMPDIR: bounds.scratch },
+    args: ['-p', ...(request.model ? ['--model', request.model] : []), ...(request.effort ? ['--effort', request.effort] : []),
+      '--permission-mode', 'dontAsk', '--allowedTools', 'Bash', '--no-session-persistence',
       // The worktree's `.claude/settings*.json` is PR content: its hooks, permissions and environment never load.
       '--setting-sources', 'user',
-      '--output-format', 'json', '--tools', tools, '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}'] }; }
-  return { command: 'codex', args: ['exec', '--color', 'never', '-C', request.worktree,
+      '--output-format', 'json', '--tools', 'Bash', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}'] }; }
+  // Codex's own Linux sandbox applies a named permission profile to every command it runs: no network, a cleared environment,
+  // read access to the system minimum, the toolchain and Git metadata, and the worktree writable only for a writer.
+  // Git directories come last and are the most specific entries, so a worktree's own `.git` stays read-only.
+  const filesystem = { ':minimal': 'read', ...Object.fromEntries(bounds.read.map((dir) => [dir, 'read'])),
+    ':workspace_roots': write ? 'write' : 'read', [bounds.scratch]: 'write', ...Object.fromEntries(bounds.git.map((dir) => [dir, 'read'])) };
+  return { command: 'codex', env: {}, args: ['exec', '--color', 'never', '-C', request.worktree,
     ...(request.profile ? ['--profile', request.profile] : []), ...(request.model ? ['-m', request.model] : []),
     ...(request.effort ? ['-c', `model_reasoning_effort="${request.effort}"`] : []),
-    '-s', 'read-only', '--ephemeral', '-'] };
+    '-c', 'default_permissions="bounded"', '-c', `permissions.bounded.filesystem=${toml(filesystem)}`,
+    '-c', 'permissions.bounded.network.enabled=false', '-c', 'shell_environment_policy.inherit="none"',
+    '-c', `shell_environment_policy.set=${toml({ PATH: bounds.path, LANG: 'C.UTF-8', HOME: bounds.scratch, TMPDIR: bounds.scratch })}`,
+    // Configured MCP servers run beside the CLI, outside the sandbox, so none is started.
+    '-c', 'approval_policy="never"', '-c', 'mcp_servers={}', '--ephemeral', '-'] };
 }
 
 // Codex prints its session header between the first two dashed lines on stderr; anything
@@ -152,7 +194,8 @@ function unwrapReport(text) {
 const writable = (path) => { try { accessSync(path, constants.W_OK); return true; } catch { return false; } };
 
 // Each writer operation is checked before its phase is spent, and recorded as what the check established, not as a
-// permission the helper cannot observe. A writer has no shell, so the coordinator commits its change. No local check
+// permission the helper cannot observe. A writer's Git metadata is read-only in the bounded worker, so the coordinator
+// commits its change. No local check
 // reaches a push transport, so a push is never reported as permitted. Only an unwritable worktree refuses.
 async function writerPermissions(request, probeSeconds) {
   const remote = request.push && await git(request.worktree, ['remote', 'get-url', '--push', request.push], probeSeconds);
@@ -190,7 +233,9 @@ async function runPhase(request) {
     requested: { model: request.model ?? null, effort: request.effort ?? null, profile: request.profile ?? null },
     started_at: new Date().toISOString(), blockers: [], coordinator: [] };
   const secrets = Object.entries(env).filter(([name, value]) => /(?:API_KEY|TOKEN|SECRET|PASSWORD)$/.test(name) && value.length >= 8).map(([, value]) => value);
+  let scratch;
   const finish = (status, fields = {}) => {
+    if (scratch) rmSync(scratch, { recursive: true, force: true });
     if (timeouts.length) { status = 'timeout'; fields = { timeouts, transport_failure: timeouts[0], ...fields }; }
     Object.assign(record, fields, { status, ended_at: new Date().toISOString() });
     return { status, record, secrets }; };
@@ -201,8 +246,8 @@ async function runPhase(request) {
   } else if ((await git(request.worktree, ['status', '--porcelain'], probeSeconds)) !== '') {
     record.blockers.push('dirty-worktree: the worktree has uncommitted changes or its status is unreadable');
   }
-  // Codex cannot edit without running commands, and its commands can read the operator's Codex login.
-  if (request.role === 'writer' && route.cli === 'codex') record.blockers.push('codex-writer: a Codex writer runs PR code next to the operator\'s login; use a Claude writer');
+  // The bounded worker is built on Linux namespaces, bubblewrap for Claude and Codex's Linux sandbox; elsewhere no role runs.
+  if (process.platform !== 'linux') record.blockers.push(`bounded-tools: role tools run only in the Linux bounded worker, not on ${process.platform}`);
   if (!record.blockers.length && request.role === 'writer') record.permissions = await writerPermissions(request, probeSeconds);
   if (record.permissions?.edit === 'not-writable') record.blockers.push('writer-permission: the worktree is not writable, so the phase could produce no change');
   if (timeouts.length || record.blockers.length) return finish('refused');
@@ -211,9 +256,22 @@ async function runPhase(request) {
   record.cli_version = version.code === 0 ? version.stdout.trim().split('\n').at(-1) : 'unverified';
   if (timeouts.length) return finish('timeout');
   if (version.code !== 0) { record.blockers.push(`${route.cli}: version probe failed; check the installed CLI`); return finish('refused'); }
-  const { command, args } = launchCommand(request);
+  scratch = mkdtempSync(join(tmpdir(), 'dev-review-pr-'));
+  const gitDirs = await git(request.worktree, ['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir'], probeSeconds);
+  const bounds = { scratch, path: env.PATH ?? '', read: toolchainDirs(env.PATH ?? '', process.env), git: [...new Set((gitDirs ?? '').split('\n').filter(Boolean))] };
+  const { command, args, env: workerEnv } = launchCommand(request, bounds);
+  const phaseEnv = { ...env, ...workerEnv };
+  if (route.cli === 'claude') {
+    const probe = await runBounded(BOUNDED_SHELL, ['true'], { cwd: request.worktree, env: phaseEnv, timeoutSeconds: probeSeconds, label: 'bounded-shell probe' });
+    if (timeouts.length) return finish('timeout');
+    if (probe.code !== 0) {
+      record.blockers.push(`bounded-shell: the worker could not start (${probe.stderr.trim().split('\n')[0]?.slice(0, 160) || `exit ${probe.code}`}); it needs bubblewrap and unprivileged user namespaces`);
+      return finish('refused');
+    }
+  }
+  const link = gitLink(request.worktree);
   record.started_at = new Date().toISOString();
-  const phase = await runBounded(command, args, { cwd: request.worktree, env, stdinPath: request.prompt,
+  const phase = await runBounded(command, args, { cwd: request.worktree, env: phaseEnv, stdinPath: request.prompt,
     timeoutSeconds: request.timeout, label: `the ${request.role} phase` });
   record.ended_at = new Date().toISOString();
   record.elapsed_seconds = Math.round(phase.elapsedMs / 1000);
@@ -222,6 +280,10 @@ async function runPhase(request) {
   const { denied = [], text, ...observed } = route.cli === 'codex' ? codexObserved(phase.stderr) : claudeObserved(phase.stdout, phase.stderr, request);
   record.observed = observed;
   record.errors = errorLines(phase.stderr);
+  if (gitLink(request.worktree) !== link) {
+    record.blockers.push('git-metadata: the phase changed the worktree\'s .git entry, so no Git command runs in it; inspect it before any commit');
+    return { ...finish('blocked'), output: { output: phase.stdout, meta: phase.stderr } };
+  }
   record.head_after = await git(request.worktree, ['rev-parse', 'HEAD'], probeSeconds);
   record.dirty_after = (await git(request.worktree, ['status', '--porcelain'], probeSeconds)) !== '';
   record.commits = record.head_after && record.head_after !== record.head_before

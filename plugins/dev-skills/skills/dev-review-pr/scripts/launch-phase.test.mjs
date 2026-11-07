@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test, { after } from 'node:test';
+import { BOUNDED_SHELL, toolchainDirs } from './launch-phase.mjs';
 
 const HELPER = fileURLToPath(new URL('./launch-phase.mjs', import.meta.url));
 const GIT = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
@@ -28,7 +29,9 @@ const cli = require('node:path').basename(process.argv[1]);
 const argv = process.argv.slice(2);
 const env = process.env;
 appendFileSync(env.STUB_LOG, JSON.stringify({ cli, argv, key: env.AZURE_OPENAI_API_KEY ?? null, openai: env.OPENAI_API_KEY ?? null,
-  session: Object.fromEntries(Object.keys(env).filter((n) => /^(CLAUDE|CODEX_COMPANION_)/.test(n)).sort().map((n) => [n, env[n] === 'sentinel:' + n])) }) + '\\n');
+  prefix: env.CLAUDE_CODE_SHELL_PREFIX ?? null, mode: env.BOUNDED_MODE ?? null,
+  session: Object.fromEntries(Object.keys(env).filter((n) => /^(CLAUDE|CODEX_COMPANION_)/.test(n) && n !== 'CLAUDE_CODE_SHELL_PREFIX').sort()
+    .map((n) => [n, env[n] === 'sentinel:' + n])) }) + '\\n');
 const after = (flag) => argv.includes(flag) ? argv[argv.indexOf(flag) + 1] : undefined;
 const config = (name) => (argv.find((a) => a.startsWith(name + '=')) ?? '').split('=').slice(1).join('=').replace(/"/g, '');
 if (env.STUB_HANG && argv.includes(env.STUB_HANG)) { setTimeout(() => {}, 30000); return; }
@@ -37,6 +40,7 @@ if (argv[0] === 'login') { console.log(env.STUB_LOGIN ?? 'Logged in using ChatGP
 readFileSync(0);
 if (env.STUB_LEAK) { console.log(env.AZURE_OPENAI_API_KEY); console.error('leak ' + env.AZURE_OPENAI_API_KEY); }
 if (env.STUB_DIRTY) writeFileSync((after('-C') ?? '.') + '/change.txt', 'writer change');
+if (env.STUB_GITLINK) writeFileSync('.git', 'gitdir: ' + env.STUB_GITLINK + '\\n');
 if (env.STUB_COMMIT) {
   writeFileSync('commit.txt', 'writer commit');
   execFileSync('git', ['add', 'commit.txt']);
@@ -51,7 +55,7 @@ if (env.STUB_SLEEP) setTimeout(() => {}, 30000);
 if (env.STUB_FAIL) { console.error('user\\nquoting any error here\\nERROR: Selected model is at capacity.'); process.exit(1); }
 if (cli === 'codex') {
   console.error(['OpenAI Codex v9.9.9', '--------', 'model: ' + (env.STUB_MODEL ?? after('-m') ?? 'configured-model'),
-    'provider: ' + (env.STUB_PROVIDER ?? 'configured-provider'), 'sandbox: ' + after('-s'),
+    'provider: ' + (env.STUB_PROVIDER ?? 'configured-provider'), 'sandbox: ' + config('default_permissions'),
     'reasoning effort: ' + (env.STUB_EFFORT ?? (config('model_reasoning_effort') || 'medium')), 'session id: stub-session', '--------', 'model: quoted'].join('\\n'));
   console.log('OK');
 } else {
@@ -82,6 +86,9 @@ function fixture({ gitHang } = {}) {
     writeFileSync(join(bin, cli), STUB);
     chmodSync(join(bin, cli), 0o755);
   }
+  // A pass-through `bwrap`, so the launch tests run where namespaces are unavailable; the boundary itself is tested below.
+  writeFileSync(join(bin, 'bwrap'), '#!/bin/sh\nwhile [ "$#" -gt 0 ] && [ "$1" != -- ]; do shift; done; shift; exec "$@"\n');
+  chmodSync(join(bin, 'bwrap'), 0o755);
   if (gitHang) { writeFileSync(join(bin, 'git'), gitStub(gitHang)); chmodSync(join(bin, 'git'), 0o755); }
   const gitIn = (...args) => execFileSync('git', ['-C', repo, '-c', 'user.name=T', '-c', 'user.email=t@x', ...args]).toString().trim();
   gitIn('init', '-q');
@@ -112,7 +119,7 @@ function launch(f, options = {}) {
   const log = read('stub.log').split('\n').filter(Boolean).map((line) => JSON.parse(line));
   return { code: result.status, stdout: result.stdout, stderr: result.stderr, recordText: read('record.json'),
     record: read('record.json') ? JSON.parse(read('record.json')) : null, output: read('out.txt'), meta: read('meta.txt'), report: read('report.md'),
-    log, exec: log.find((entry) => entry.argv[0] === 'exec' || entry.argv[0] === '-p') };
+    log, exec: log.findLast((entry) => entry.argv[0] === 'exec' || entry.argv[0] === '-p') };
 }
 
 const hasPair = (argv, flag, value) => argv.some((arg, index) => arg === flag && argv[index + 1] === value);
@@ -120,7 +127,6 @@ const hasPair = (argv, flag, value) => argv.some((arg, index) => arg === flag &&
 test('each supported CLI role uses configured defaults without rewriting configuration', () => {
   for (const provider of ['codex', 'claude']) {
     for (const role of ['reviewer', 'writer']) {
-      if (provider === 'codex' && role === 'writer') continue; // refused; see the Codex writer test
       const f = fixture();
       const config = join(f.home, '.codex', 'config.toml');
       const before = readFileSync(config, 'utf8');
@@ -130,12 +136,20 @@ test('each supported CLI role uses configured defaults without rewriting configu
       assert.deepEqual(run.record.requested, { model: null, effort: null, profile: null });
       const { argv } = run.exec;
       if (provider === 'codex') {
-        assert.ok(hasPair(argv, '-s', 'read-only'));
-        assert.ok(!argv.includes('--ignore-user-config') && !argv.includes('-m'));
+        // The demonstrated bounded profile: no legacy sandbox flag, no network, a cleared environment, no integrations.
+        for (const pair of ['default_permissions="bounded"', 'permissions.bounded.network.enabled=false', 'shell_environment_policy.inherit="none"',
+          'approval_policy="never"', 'mcp_servers={}']) assert.ok(hasPair(argv, '-c', pair), pair);
+        const filesystem = argv.find((arg) => arg.startsWith('permissions.bounded.filesystem='));
+        assert.ok(filesystem.includes(`":minimal"="read"`) && filesystem.includes(`":workspace_roots"="${role === 'writer' ? 'write' : 'read'}"`), filesystem);
+        assert.ok(filesystem.includes(`${JSON.stringify(join(realpathSync(f.repo), '.git'))}="read"`), 'Git metadata stays read-only');
+        assert.ok(!filesystem.includes(JSON.stringify(f.home)) && !filesystem.includes('.codex'), 'no login directory is granted');
+        assert.ok(argv.find((arg) => arg.startsWith('shell_environment_policy.set=')).includes('"LANG"="C.UTF-8"'));
+        assert.ok(!argv.includes('-s') && !argv.includes('--sandbox') && !argv.includes('-m'));
       } else {
-        assert.ok(hasPair(argv, '--tools', role === 'reviewer' ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write'));
+        assert.ok(hasPair(argv, '--tools', 'Bash') && hasPair(argv, '--allowedTools', 'Bash'), 'the bounded shell is the only tool');
+        assert.deepEqual([run.exec.prefix, run.exec.mode], [BOUNDED_SHELL, role === 'writer' ? 'write' : 'read']);
         assert.ok(argv.includes('--strict-mcp-config') && !argv.includes('--model'));
-        assert.ok(hasPair(argv, '--permission-mode', 'acceptEdits'));
+        assert.ok(hasPair(argv, '--permission-mode', 'dontAsk'));
         assert.ok(hasPair(argv, '--setting-sources', 'user'), 'PR-controlled project settings must not load');
       }
       assert.equal(readFileSync(config, 'utf8'), before);
@@ -179,7 +193,7 @@ test('the phase record distinguishes configuration requests from observed facts'
   const { record } = launch(fixture());
   assert.equal(record.status, 'completed');
   assert.deepEqual(record.observed, { provider: 'configured-provider', model: 'configured-model', effort: 'medium', context: 'N/A (not emitted)',
-    session: 'stub-session', sandbox: 'read-only', completed: true });
+    session: 'stub-session', sandbox: 'bounded', completed: true });
   assert.equal(record.cli_version, 'codex 9.9.9');
   assert.ok(!Number.isNaN(Date.parse(record.started_at)) && !Number.isNaN(Date.parse(record.ended_at)));
   assert.deepEqual([record.exit_code, record.run_id, record.round, record.phase, record.attempt], [0, 'run-1', 1, 'review', 1]);
@@ -372,19 +386,76 @@ test('a writer that leaves uncommitted changes completes, and the coordinator co
   assert.match(refused.stderr, /is not a commit descending from/);
 });
 
-test('no writer gets a shell, and a Codex writer is refused before launch', () => {
+test('both writers run, each only through the bounded worker, and the coordinator commits for them', () => {
   const f = fixture();
   const linked = join(f.root, 'linked');
   f.gitIn('worktree', 'add', '-q', linked, f.head);
-  for (const worktree of [f.repo, linked]) {
-    const claude = launch(f, { provider: 'claude', role: 'writer', flags: { worktree } });
-    assert.deepEqual([claude.record.permissions.commit, Boolean(claude.exec)], ['coordinator-required', true], `${worktree}: ${claude.recordText}`);
-    assert.ok(!claude.exec.argv.join(',').includes('Bash'), 'a writer shell would run PR code under the operator login');
+  for (const provider of ['claude', 'codex']) {
+    for (const worktree of [f.repo, linked]) {
+      const run = launch(f, { provider, role: 'writer', env: { STUB_DIRTY: '1' }, flags: { worktree } });
+      assert.deepEqual([run.code, run.record.permissions.commit, run.record.dirty_after], [0, 'coordinator-required', true], `${provider} ${worktree}: ${run.recordText}`);
+      if (provider === 'claude') assert.ok(!/\b(?:Read|Edit|Write|Glob|Grep)\b/.test(run.exec.argv.join(' ')), 'no native file tool outside the worker');
+      else {
+        // A linked worktree's Git directories live outside it; both are granted read-only.
+        const filesystem = run.exec.argv.find((arg) => arg.startsWith('permissions.bounded.filesystem='));
+        for (const dir of f.gitIn('-C', worktree, 'rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir').split('\n')) {
+          assert.ok(filesystem.includes(`${JSON.stringify(dir)}="read"`), `${dir} in ${filesystem}`);
+        }
+      }
+      f.gitIn('-C', worktree, 'clean', '-qfd');
+    }
   }
-  const codex = launch(fixture(), { provider: 'codex', role: 'writer' });
-  assert.equal(codex.record.status, 'refused');
-  assert.match(codex.record.blockers[0], /^codex-writer:/);
-  assert.equal(codex.exec, undefined);
+});
+
+test('a phase that rewrites the worktree\'s .git link is blocked before any Git command trusts it', () => {
+  const f = fixture();
+  const linked = join(f.root, 'linked');
+  f.gitIn('worktree', 'add', '-q', linked, f.head);
+  for (const provider of ['claude', 'codex']) {
+    const run = launch(f, { provider, role: 'writer', env: { STUB_GITLINK: join(f.root, 'planted') }, flags: { worktree: linked } });
+    assert.equal(run.record.status, 'blocked', run.recordText);
+    assert.match(run.record.blockers.join('\n'), /^git-metadata:/m);
+    assert.equal(run.record.head_after, undefined, 'no Git command ran in the tampered worktree');
+    writeFileSync(join(linked, '.git'), `gitdir: ${f.gitIn('-C', f.repo, 'rev-parse', '--path-format=absolute', '--git-common-dir')}/worktrees/linked\n`);
+  }
+});
+
+test('the bounded worker mounts no home directory or CLI login', () => {
+  const root = mkdtempSync(join(tmpdir(), 'toolchain-'));
+  roots.push(root);
+  const home = join(root, 'home');
+  for (const dir of ['home/.local/bin', 'home/.nvm/v1/bin', 'home/.codex/bin', 'opt/tool/bin', 'opt/plain']) mkdirSync(join(root, dir), { recursive: true });
+  symlinkSync(home, join(root, 'home-link'));
+  const path = ['home/.local/bin', 'home/.nvm/v1/bin', 'home/.codex/bin', 'opt/tool/bin', 'opt/plain', 'home', 'home-link', '', 'relative/bin']
+    .map((dir) => (dir && dir !== 'relative/bin' ? join(root, dir) : dir)).join(':');
+  assert.deepEqual(toolchainDirs(path, { HOME: home }).sort(), [join(root, 'home/.local/bin'), join(root, 'home/.nvm/v1'), join(root, 'home/.nvm/v1/bin'),
+    join(root, 'opt/plain'), join(root, 'opt/tool'), join(root, 'opt/tool/bin')].sort());
+});
+
+// The real boundary, with synthetic markers only: a credential file and an environment marker outside the worker, and an
+// edit, a diff and a check inside it. Skipped where unprivileged namespaces or bubblewrap are unavailable.
+test('the bounded shell hides the caller\'s credentials and environment, and confines writes to the worktree', (t) => {
+  if (spawnSync('bwrap', ['--unshare-all', '--ro-bind', '/', '/', 'true']).status !== 0) return t.skip('bubblewrap or user namespaces unavailable');
+  const f = fixture();
+  const login = join(f.home, '.claude');
+  mkdirSync(login);
+  writeFileSync(join(login, '.credentials.json'), '{"synthetic":"LOGIN-MARKER-41c2"}');
+  const scratch = mkdtempSync(join(tmpdir(), 'bounded-scratch-'));
+  roots.push(scratch);
+  const shell = (mode, command) => spawnSync(BOUNDED_SHELL, [command], { cwd: f.repo, encoding: 'utf8', env: { PATH: process.env.PATH, HOME: f.home,
+    SYNTHETIC_PROVIDER_TOKEN: 'ENV-MARKER-9d1e', BOUNDED_WORKTREE: f.repo, BOUNDED_MODE: mode, BOUNDED_SCRATCH: scratch, BOUNDED_PATH: process.env.PATH,
+    BOUNDED_GIT: f.gitIn('rev-parse', '--path-format=absolute', '--git-common-dir') } });
+  const probe = shell('write', `cat ${join(login, '.credentials.json')}; env; cat /proc/*/environ; ls /proc; echo edited > file.txt; git diff --stat; test "$(cat file.txt)" = edited && echo CHECKED`);
+  const seen = probe.stdout + probe.stderr;
+  for (const marker of ['LOGIN-MARKER-41c2', 'ENV-MARKER-9d1e']) assert.ok(!seen.includes(marker), `${marker} reached the worker`);
+  assert.match(probe.stdout, /file\.txt \| 2 \+-/);
+  assert.match(probe.stdout, /CHECKED/);
+  assert.equal(readFileSync(join(f.repo, 'file.txt'), 'utf8'), 'edited\n');
+  for (const [mode, command] of [['read', 'echo x > file.txt'], ['write', 'echo x > .git/planted'], ['write', `echo x > ${join(f.home, 'outside')}`]]) {
+    assert.notEqual(shell(mode, command).status, 0, `${mode}: ${command}`);
+  }
+  assert.ok(!existsSync(join(f.repo, '.git/planted')) && !existsSync(join(f.home, 'outside')));
+  assert.equal(readFileSync(join(f.repo, 'file.txt'), 'utf8'), 'edited\n');
 });
 
 test('a role child receives no coordinator session variable, and a Claude child keeps only its login and provider variables', () => {
@@ -393,7 +464,6 @@ test('a role child receives no coordinator session variable, and a Claude child 
   const sentinels = Object.fromEntries(names.map((name) => [name, `sentinel:${name}`]));
   for (const provider of ['codex', 'claude']) {
     for (const role of ['reviewer', 'writer']) {
-      if (provider === 'codex' && role === 'writer') continue;
       const run = launch(fixture(), { provider, role, env: sentinels });
       assert.equal(run.code, 0, run.recordText);
       assert.ok(run.log.length >= 2, 'the version probe and the phase');

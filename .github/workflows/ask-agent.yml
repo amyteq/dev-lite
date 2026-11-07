@@ -70,7 +70,21 @@ env:
   PATCH_FILE: ${{ github.workspace }}/result/changes.patch
 
 jobs:
+  # Debug logging traces every evaluated condition with its expanded values, so a run with it on
+  # stops in a job that references no variable, before any later job evaluates one.
+  debug-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Refuse debug logging before any variable is evaluated
+        if: runner.debug == '1'
+        run: |
+          echo '::error::Debug logging would trace repository variable values. Run again without debug logging.'
+          exit 1
+
   prepare:
+    needs: debug-gate
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -83,6 +97,12 @@ jobs:
       checkout_sha: ${{ steps.snapshot.outputs.checkout_sha }}
       request_artifact: ${{ steps.save.outputs.artifact-id }}
     steps:
+      # Re-running only this job reuses the gate's earlier success, so it repeats the check first.
+      - name: Refuse debug logging before any variable is evaluated
+        if: runner.debug == '1'
+        run: |
+          echo '::error::Debug logging would trace repository variable values. Run again without debug logging.'
+          exit 1
       - name: Require this workflow's own revision
         env:
           TOOLS_REPOSITORY: ${{ job.workflow_repository }}
@@ -107,9 +127,15 @@ jobs:
           persist-credentials: false
       # The routing step's environment is printed in its log, so a credential-shaped
       # value must stop the job before that step renders it. Only this condition reads
-      # the values (case-insensitively, across every variable); it prints a fixed message.
+      # the values (case-insensitively, across every variable, untraced because debug
+      # logging stopped above); it prints a fixed message. A value with leading
+      # whitespace or a leading JSON escape (`\n`, `\t`, ...) stops too, so no padding
+      # can move a prefix the routing step recognises past this check.
       - name: Stop before rendering a credential-shaped variable
         if: >-
+            success() && runner.debug != '1' && (
+            contains(toJSON(vars), '": " ') ||
+            contains(toJSON(vars), '": "\') ||
             contains(toJSON(vars), '"-----BEGIN') ||
             contains(toJSON(vars), '"sk-') ||
             contains(toJSON(vars), '"sk_live') ||
@@ -121,9 +147,9 @@ jobs:
             contains(toJSON(vars), '"github_pat_') ||
             contains(toJSON(vars), '_token\"') ||
             contains(toJSON(vars), 'client_secret\"') ||
-            contains(toJSON(vars), 'private_key\"')
+            contains(toJSON(vars), 'private_key\"'))
         run: |
-          echo '::error::A repository variable value looks like a credential. Variables are not secret and the routing step prints them: move the value to an Actions secret, delete the variable, and run again.'
+          echo '::error::A repository variable value looks like a credential or starts with whitespace. Variables are not secret and the routing step prints them: move a credential to an Actions secret, delete the variable or trim the value, and run again.'
           exit 1
       - name: Route mention
         id: route
@@ -208,7 +234,10 @@ jobs:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           path: .agent-tools
-          sparse-checkout: scripts/github-agent
+          # run_agent.py uses the dev-review-pr worker shell as Claude's trusted shell prefix.
+          sparse-checkout: |
+            scripts/github-agent
+            plugins/dev-skills/skills/dev-review-pr/scripts
           persist-credentials: false
       - name: Download the immutable authorized request
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
@@ -243,6 +272,15 @@ jobs:
           test "$("$TOOLS/cli/node_modules/.bin/codex" --version)" = "codex-cli 0.154.0"
           echo "$TOOLS/cli/node_modules/.bin" >> "$GITHUB_PATH"
           mkdir -p "${GITHUB_WORKSPACE}/result"
+      # Both bounded workers need unprivileged user namespaces, which Ubuntu 24.04's AppArmor
+      # restricts by default; Claude's worker shell also needs bubblewrap. Done before any credential.
+      - name: Prepare the bounded worker before credentials are supplied
+        run: |
+          command -v bwrap >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q bubblewrap; }
+          if [[ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null)" == 1 ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --unshare-all --ro-bind / / true
       - name: Run the authorized agent (no GitHub token)
         id: agent
         continue-on-error: true

@@ -33,7 +33,7 @@ def checked_path(path: str) -> None:
         raise ValueError(f'Private or invalid patch path: {path!r}')
 
 
-# High-confidence credential values in added patch lines and the reply: private
+# High-confidence credential values anywhere in a patch and the reply: private
 # keys, GitHub tokens, Anthropic/OpenAI keys and the token fields of an OAuth auth.json.
 CREDENTIAL_CONTENT = re.compile(
     rb"-----BEGIN [A-Z ]*PRIVATE KEY-----"
@@ -44,13 +44,17 @@ CREDENTIAL_CONTENT = re.compile(
 
 
 def check_patch_content(patch: bytes) -> None:
-    """Refuse a patch whose added lines carry a credential value, or that cannot be read as text."""
+    """Refuse a patch that carries a credential value anywhere, or that cannot be read as text.
+
+    The patch is uploaded and published whole, so headers, paths, context and removed
+    lines are scanned as well as added ones.
+    """
     for line in patch.splitlines():
         # A binary hunk is base85 (or absent), so its content cannot be inspected.
         if line.startswith((b'GIT binary patch', b'Binary files ')):
             raise ValueError('Binary changes cannot be inspected and are not published')
-        if line.startswith(b'+') and not line.startswith(b'+++') and CREDENTIAL_CONTENT.search(line):
-            raise ValueError('Patch adds a credential-shaped value')
+    if CREDENTIAL_CONTENT.search(patch):
+        raise ValueError('Patch carries a credential-shaped value')
 
 
 def check_reply_content(text: bytes) -> None:

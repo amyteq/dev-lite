@@ -175,15 +175,19 @@ _CREDENTIAL_PREFIXES = (
 
 
 def credential_shaped_variables(variables: dict[str, str]) -> list[str]:
-    """Names of configuration variables whose value looks like a credential."""
+    """Names of configuration variables whose value looks like a credential.
+
+    This never flags a value the workflow's earlier gate lets through, so nothing it
+    recognises reaches a rendered step: the value is read unstripped, a leading space or
+    control character is refused as the gate refuses it, and a JSON key counts only with
+    its closing quote.
+    """
     flagged = []
     for name, value in sorted(variables.items()):
-        text = (value or "").strip()
-        if not text:
-            continue
-        if text.startswith(_CREDENTIAL_PREFIXES):
+        text = value or ""
+        if text[:1] == " " or (text and ord(text[0]) < 32) or text.startswith(_CREDENTIAL_PREFIXES):
             flagged.append(name)
-        elif text.startswith("{") and any(key in text.lower() for key in _CREDENTIAL_JSON_KEYS):
+        elif text.startswith("{") and any(f'{key}"' in text.lower() for key in _CREDENTIAL_JSON_KEYS):
             flagged.append(name)
     return flagged
 
@@ -408,6 +412,23 @@ def mention_commands(text: str, mention: str) -> set[str]:
     """
     text = text or ""
     return {_split_request(text[match.end() :])[0] for match in _mention_pattern(mention).finditer(text)}
+
+
+def code_may_be_open_at_mention(text: str, mention: str) -> bool:
+    """Whether code could still be open where the selected mention starts.
+
+    A writable run needs certainty, and Markdown containers such as list items let
+    fences and multi-line code spans open where the masking above does not look. So
+    any fence before the mention, or a backtick run not closed by an equal-length run
+    before it, counts as open code; the request then runs read-only.
+    """
+    before = (text or "")[: max(find_mention(text, mention), 0)]
+    if "```" in before or "~~~" in before:
+        return True
+    open_run = None
+    for run in re.findall(r"`+", before):
+        open_run = None if run == open_run else open_run or run
+    return open_run is not None
 
 
 def branch_list(text: str | None) -> list[str]:

@@ -345,14 +345,20 @@ const PULLS = [pull(1, 'example-org', 'example-repo', 'develop'), pull(2, 'examp
   pull(3, 'someone', 'example-repo', 'topic'), pull(4, 'another', 'example-repo', 'topic')];
 
 test('the current branch selects the PR from its published head, never its pull upstream or a same-name fork', () => {
-  const origin = { remote: 'origin', remoteUrl: 'https://github.com/example-org/example-repo.git', pulls: PULLS };
+  const mapped = (remote) => ({ branch: 'topic', remote, fetch: `+refs/heads/*:refs/remotes/${remote}/*`, pushSpecs: '' });
+  const origin = { ...mapped('origin'), remoteUrl: 'https://github.com/example-org/example-repo.git', pulls: PULLS };
   assert.deepEqual(branchCandidates({ ...origin, push: 'refs/remotes/origin/topic' }), [2]);
-  assert.deepEqual(branchCandidates({ remote: 'fork', remoteUrl: 'git@github.com:Someone/example-repo.git', pulls: PULLS,
+  assert.deepEqual(branchCandidates({ ...mapped('fork'), remoteUrl: 'git@github.com:Someone/example-repo.git', pulls: PULLS,
     push: 'refs/remotes/fork/topic' }), [3]);
-  assert.deepEqual(branchCandidates({ remote: 'fork', remoteUrl: 'ssh://git@github.com/someone/example-repo', pulls: PULLS,
+  assert.deepEqual(branchCandidates({ ...mapped('fork'), remoteUrl: 'ssh://git@github.com/someone/example-repo', pulls: PULLS,
     push: 'refs/remotes/fork/topic' }), [3]);
+  const topic = { push: 'refs/remotes/origin/topic' };
   for (const uncertain of [{ push: '' }, { push: 'refs/remotes/origin/' }, { push: 'refs/remotes/fork/topic' },
-    { push: 'refs/remotes/origin/topic', remoteUrl: 'https://gitlab.example.com/example-org/example-repo.git' }, { push: 'refs/remotes/origin/topic', remote: '' }]) {
+    { ...topic, remoteUrl: 'https://gitlab.example.com/example-org/example-repo.git' }, { ...topic, remote: '' },
+    { ...topic, branch: '' }, { push: 'refs/remotes/origin/topic\nrefs/remotes/origin/topic' },
+    { ...topic, fetch: '+refs/heads/main:refs/remotes/origin/topic' }, { ...topic, fetch: '' },
+    { ...topic, fetch: '+refs/heads/*:refs/remotes/origin/*\n+refs/heads/x:refs/remotes/origin/topic' },
+    { ...topic, pushSpecs: 'refs/heads/topic:refs/heads/main' }]) {
     assert.deepEqual(branchCandidates({ ...origin, ...uncertain }), [], JSON.stringify(uncertain));
   }
 });
@@ -366,9 +372,13 @@ test('the documented git commands and the helper pick the topic PR when the bran
   git('update-ref', 'refs/remotes/origin/develop', 'HEAD');
   git('checkout', '-q', '-b', 'topic');
   git('branch', '-q', '--set-upstream-to=origin/develop');
+  // The documented lookup, step by step: a detached HEAD stops before any ref is read.
   const input = () => {
-    const remote = git('for-each-ref', '--format=%(push:remotename)', 'refs/heads/topic');
-    return { push: git('for-each-ref', '--format=%(push)', 'refs/heads/topic'), remote,
+    const branch = git('branch', '--show-current');
+    if (!branch) return null;
+    const remote = git('for-each-ref', '--format=%(push:remotename)', `refs/heads/${branch}`);
+    return { branch, push: git('for-each-ref', '--format=%(push)', `refs/heads/${branch}`), remote,
+      fetch: remote ? git('config', '--get-all', `remote.${remote}.fetch`) : '', pushSpecs: remote ? git('config', '--get-all', `remote.${remote}.push`) : '',
       remoteUrl: remote ? git('remote', 'get-url', '--push', remote) : '', pulls: PULLS };
   };
   assert.deepEqual(branchCandidates(input()), [], 'a simple push to a differently named upstream has no published head');
@@ -376,4 +386,20 @@ test('the documented git commands and the helper pick the topic PR when the bran
   assert.deepEqual(branchCandidates(input()), [2]);
   const run = cli('branch', '--input', file('branch.json', JSON.stringify(input())));
   assert.deepEqual([run.status, JSON.parse(run.stdout)], [0, [2]]);
+  // F025 round 3: a fetch mapping that renames the tracking ref, so `%(push)` no longer names the remote branch.
+  git('config', 'push.default', 'upstream');
+  git('config', '--replace-all', 'remote.origin.fetch', '+refs/heads/main:refs/remotes/origin/develop');
+  git('config', 'branch.topic.merge', 'refs/heads/main');
+  assert.equal(git('for-each-ref', '--format=%(push)', 'refs/heads/topic'), 'refs/remotes/origin/develop');
+  assert.deepEqual(branchCandidates(input()), [], 'a renamed tracking ref never selects the integration PR');
+  git('config', '--replace-all', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*');
+  git('config', 'remote.origin.push', 'refs/heads/topic:refs/heads/main');
+  assert.deepEqual(branchCandidates(input()), [], 'a push refspec is not resolved');
+  // A detached HEAD in a checkout whose only branch has a PR selects nothing.
+  git('config', '--unset', 'remote.origin.push');
+  git('config', 'push.default', 'current');
+  git('checkout', '-q', '--detach');
+  assert.equal(input(), null);
+  assert.deepEqual(branchCandidates({ branch: '', push: 'refs/remotes/origin/topic', remote: 'origin', fetch: '+refs/heads/*:refs/remotes/origin/*',
+    pushSpecs: '', remoteUrl: 'https://github.com/example-org/example-repo.git', pulls: PULLS }), []);
 });

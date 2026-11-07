@@ -4,8 +4,8 @@
 //
 // A Story's issue is an open issue whose body's first line is this skill's origin marker for the
 // Story and whose author holds write access, since anyone who can open an issue can copy a marker.
-// A marker issue whose author lacks write access now may still be the original, so it blocks a
-// create until a maintainer names the original. Every absent or unreadable input stops instead of
+// A marker issue whose author lacks write access now may still be the original, so it blocks any
+// automatic reuse or create until a maintainer names the original. Every absent or unreadable input stops instead of
 // defaulting. See references/resolver-contract.md.
 //
 // CLI:  node resolve-story-issue.mjs <input.json>   (or `-` for stdin)
@@ -249,14 +249,20 @@ function selectedByMaintainer(input, key, marked, selection) {
   };
 }
 
-// The Story's issue is its one open marker issue by an author with write access. Marker issues by
-// anyone else are reported as `duplicates`, never selected; two or more eligible ones stop for a human.
+// The Story's issue is its one open marker issue by an author with write access. Two or more
+// eligible ones stop for a human, and so does any marker issue by another author.
 function decide(input, key, issues) {
   const marked = issues.filter((c) => c.open && c.marker === 'marked').sort((a, b) => a.number - b.number);
   if (input?.selection !== undefined && input?.selection !== null) return selectedByMaintainer(input, key, marked, input.selection);
   const eligible = marked.filter(trusted);
-  const duplicates = marked.filter((c) => !trusted(c)).map((c) => c.number);
-  const copies = duplicates.length ? `; ${ids(duplicates)} also carry the marker but were opened without write access, so they are reported for a human` : '';
+  const uncertain = marked.filter((c) => !trusted(c)).map((c) => c.number);
+  // The original's author may have lost write access or deleted their account, which no listing can tell
+  // apart from a copy, and a current writer's issue may itself be the copy. So any marker issue of uncertain
+  // provenance stops, beside an eligible one too, and never leads to a reuse or a create.
+  if (uncertain.length) {
+    const all = marked.map((c) => c.number);
+    return STOP('MARKER_PROVENANCE_UNCERTAIN', `${ids(all)} carry ${key}'s origin marker, and the author of ${ids(uncertain)} has no write access now, so the original cannot be told from a copy. A maintainer must name the original: re-run with \`original=<number>\` for one of them.`, all);
+  }
   if (eligible.length > 1) {
     return STOP('DUPLICATE_MARKERS', `${ids(eligible.map((c) => c.number))} all carry ${key}'s origin marker and were opened with write access; a human must decide which is the Story's issue.`,
       eligible.map((c) => c.number));
@@ -267,18 +273,13 @@ function decide(input, key, issues) {
     return {
       action: 'reuse',
       reasonCode: 'REUSE_MARKED',
-      reason: `Reusing #${hit.number}, the only open issue whose first line is ${key}'s origin marker and whose author has write access${copies}.`,
+      reason: `Reusing #${hit.number}, the only open issue whose first line is ${key}'s origin marker, and its author has write access.`,
       issue: { number: hit.number, url: hit.url },
       selected: hit.number,
-      duplicates,
+      duplicates: [],
       conflicts: [],
       plannedWrites: { createIssue: 0, invokeRefineIssue: 1 },
     };
-  }
-  // The original's author may have lost write access or deleted their account, which no listing can
-  // tell apart from a copy, so no marker issue of uncertain provenance ever leads to a create.
-  if (duplicates.length) {
-    return STOP('MARKER_PROVENANCE_UNCERTAIN', `${ids(duplicates)} carry ${key}'s origin marker, but no author still has write access, so the original cannot be told from a copy. A maintainer must name the original: re-run with \`original=<number>\` for one of them.`, duplicates);
   }
   if (input?.authority?.createAuthorized !== true) {
     return STOP('CREATE_NOT_AUTHORIZED', `No open issue by an author with write access carries ${key}'s origin marker and this run holds no explicit creation authority.`);

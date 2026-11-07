@@ -13,10 +13,13 @@ discussions, and so that both can authenticate with OAuth:
   fallback for anyone who prefers key auth.
 
 The authorized model runs without GitHub mutation credentials in a disposable
-execution job, and the session that holds the provider credential never runs
-checkout commands: anything it spawns runs as the same user and could read that
-credential (README "Trust boundary"). Writable work is collected as a patch for
-validation in a fresh, trusted publisher job; checks run on the draft PR.
+execution job. The provider credential stays in the CLI process; every
+model-directed read, edit and command runs in a bounded worker with the checkout,
+a cleared environment, no network and no view of that process or its credential
+files (README "Trust boundary"): Codex through its own Linux sandbox and a named
+permission profile, Claude through the bubblewrap shell prefix shared with the
+dev-review-pr skill. Writable work is collected as a patch for validation in a
+fresh, trusted publisher job.
 
 The status file also carries what the reply signature needs: the start time, the
 measured duration, and the model and effort the CLI itself reported. Prompt text
@@ -29,6 +32,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -42,16 +46,45 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from agent_lib import load_config, load_context, log, warn  # noqa: E402
 
 
-# Both CLIs read the prompt from stdin: a long thread as one argument exceeds the
-# kernel's per-argument limit (E2BIG) before the CLI starts.
-# Claude's built-in tools without command execution, web access or subagents. The
-# credential is in the CLI's own environment, so reads of /proc are refused too.
-READ_TOOLS = ("Read", "Glob", "Grep")
-EDIT_TOOLS = READ_TOOLS + ("Edit", "Write")
+# The trusted worker shell, checked out beside these scripts (the execute job's sparse checkout).
+BOUNDED_SHELL = Path(__file__).resolve().parents[2] / "plugins/dev-skills/skills/dev-review-pr/scripts/bounded-shell.sh"
 
 
-def claude_command(config, writable: bool = False) -> tuple[list[str], dict[str, str], str]:
-    tools = EDIT_TOOLS if writable else READ_TOOLS
+def toolchain_dirs(path: str, home: str, logins: tuple[str, ...]) -> list[str]:
+    """Read-only toolchain mounts, as in launch-phase.mjs: each absolute PATH directory and a `bin`
+    directory's installation prefix unless that is the home directory or directly inside it. A
+    directory that is or holds the home directory or a login location, or lies in a login location,
+    is never mounted."""
+    home = os.path.realpath(home) if home else ""
+    logins = tuple(os.path.realpath(login) for login in logins if login)
+    covers = lambda outer, inner: inner == outer or inner.startswith(outer + "/")  # noqa: E731
+    dirs: list[str] = []
+    for entry in path.split(":"):
+        if not os.path.isabs(entry) or not os.path.isdir(entry):
+            continue
+        real = os.path.realpath(entry)
+        shallow = bool(home) and home in (os.path.dirname(real), os.path.dirname(os.path.dirname(real)))
+        for candidate in [real, os.path.dirname(real)] if os.path.basename(real) == "bin" and not shallow else [real]:
+            if candidate != "/" and candidate not in dirs and not any(covers(candidate, p) for p in (home, *logins) if p) \
+                    and not any(covers(login, candidate) for login in logins):
+                dirs.append(candidate)
+    return dirs
+
+
+def worker_bounds(work_dir: str) -> dict:
+    """What the bounded worker may see: the toolchain and Git metadata read-only, plus a fresh scratch directory."""
+    temp = os.environ.get("RUNNER_TEMP") or tempfile.gettempdir()
+    scratch = tempfile.mkdtemp(prefix="agent-worker-", dir=temp)
+    path = os.environ.get("PATH", "")
+    # The runner's temporary directory holds the Codex login, so neither it nor anything in it is a toolchain.
+    return {"scratch": scratch, "path": path, "git": [os.path.join(work_dir, ".git")], "work_dir": work_dir,
+            "read": toolchain_dirs(path, os.environ.get("HOME", ""), (temp,))}
+
+
+def claude_command(config, writable: bool, bounds: dict) -> tuple[list[str], dict[str, str], str]:
+    # Bash is the only tool and the trusted shell prefix runs every command in the bounded worker.
+    # Native file tools would run in the CLI process that holds the credential, so none is offered.
+    tools = ("Bash",)
     allowed = {tool.strip() for tool in config.get("ALLOWED_TOOLS").split(",") if tool.strip()}
     if allowed:
         tools = tuple(tool for tool in tools if tool in allowed)
@@ -66,18 +99,34 @@ def claude_command(config, writable: bool = False) -> tuple[list[str], dict[str,
         "--strict-mcp-config",
         "--no-session-persistence",
         "--tools", ",".join(tools),
-        "--permission-mode", "acceptEdits" if writable else "dontAsk",
-        "--disallowedTools", "Read(//proc/**)",
+        "--allowedTools", ",".join(tools),
+        "--permission-mode", "dontAsk",
     ]
     if config.get("MODEL"):
         argv.extend(["--model", config.get("MODEL")])
     if config.get("EFFORT"):
         argv.extend(["--effort", config.get("EFFORT")])
+    env = {"CLAUDE_CODE_SHELL_PREFIX": str(BOUNDED_SHELL), "BOUNDED_WORKTREE": bounds["work_dir"],
+           "BOUNDED_MODE": "write" if writable else "read", "BOUNDED_SCRATCH": bounds["scratch"],
+           "BOUNDED_READ": "\n".join(bounds["read"]), "BOUNDED_GIT": "\n".join(bounds["git"]),
+           "BOUNDED_PATH": bounds["path"], "TMPDIR": bounds["scratch"]}
     # Claude prints one JSON result on stdout: the final message plus the models it used.
-    return argv, {}, "stdout"
+    return argv, env, "stdout"
 
 
-def codex_command(config, result_file: str) -> tuple[list[str], dict[str, str], str]:
+def probe_worker(env: dict[str, str]) -> None:
+    """Refuse to launch Claude when the bounded shell cannot start, instead of running it without tools."""
+    result = subprocess.run([env["CLAUDE_CODE_SHELL_PREFIX"], "true"], env={"PATH": os.environ.get("PATH", ""), **env},
+                            cwd=env["BOUNDED_WORKTREE"], capture_output=True, text=True, timeout=60)
+    if result.returncode:
+        raise SystemExit(f"the bounded worker could not start: {result.stderr.strip()[:200]}")
+
+
+def toml(table: dict[str, str]) -> str:
+    return "{" + ", ".join(f"{json.dumps(key)}={json.dumps(value)}" for key, value in table.items()) + "}"
+
+
+def codex_command(config, result_file: str, bounds: dict, writable: bool = False) -> tuple[list[str], dict[str, str], str]:
     home = Path(tempfile.mkdtemp(prefix="agent-codex-", dir=os.environ.get("RUNNER_TEMP")))
     home.chmod(0o700)
     env: dict[str, str] = {"CODEX_HOME": str(home)}
@@ -101,13 +150,23 @@ def codex_command(config, result_file: str) -> tuple[list[str], dict[str, str], 
             "Run `codex login` locally and store ~/.codex/auth.json as the CODEX_AUTH_JSON secret."
         )
 
-    # Codex cannot run without executing commands, so it only ever answers: its
-    # read-only sandbox has no network and normalize_event never makes it writable.
+    # The demonstrated bounded profile: Codex's Linux sandbox runs every command with no network, a
+    # cleared environment, read access to the system minimum, the toolchain and Git metadata, and
+    # the checkout writable only for an authorized writer. No legacy --sandbox flag is passed.
+    filesystem = {":minimal": "read", **{path: "read" for path in bounds["read"]},
+                  ":workspace_roots": "write" if writable else "read", bounds["scratch"]: "write",
+                  **{path: "read" for path in bounds["git"]}}
+    shell_env = {"PATH": bounds["path"], "LANG": "C.UTF-8", "HOME": bounds["scratch"], "TMPDIR": bounds["scratch"]}
     argv = [
         "codex",
         "exec",
         "--ignore-user-config", "--ignore-rules", "--ephemeral",
-        "--sandbox", "read-only",
+        "-c", 'default_permissions="bounded"',
+        "-c", f"permissions.bounded.filesystem={toml(filesystem)}",
+        "-c", "permissions.bounded.network.enabled=false",
+        "-c", 'shell_environment_policy.inherit="none"',
+        "-c", f"shell_environment_policy.set={toml(shell_env)}",
+        "-c", 'approval_policy="never"',
         "--output-last-message",
         result_file,
     ]
@@ -116,7 +175,7 @@ def codex_command(config, result_file: str) -> tuple[list[str], dict[str, str], 
     effort = config.get("EFFORT")
     if effort:
         argv.extend(["-c", f"model_reasoning_effort={effort}"])
-    argv.append("-")  # read the prompt from stdin
+    argv.append("-")  # both CLIs read the prompt from stdin: one huge argument fails with E2BIG
     # `--output-last-message` already writes the reply; stdout is the final message
     # and stderr the transcript, which opens with the session header we read.
     return argv, env, "stderr"
@@ -255,11 +314,13 @@ def main() -> int:
     code = 1
     status = {"agent": config.agent, "exit_code": code, "command": context.get("command", "")}
     env = {}
+    bounds = worker_bounds(work_dir)
     try:
         if config.agent == "claude":
-            argv, env, capture = claude_command(config, bool(context.get("writable")))
+            argv, env, capture = claude_command(config, bool(context.get("writable")), bounds)
+            probe_worker(env)
         else:
-            argv, env, capture = codex_command(config, result_file)
+            argv, env, capture = codex_command(config, result_file, bounds, bool(context.get("writable")))
         process = launch(argv, env, work_dir, capture)
         # The process exists from here on: record its start at once, so a run the
         # job timeout kills still has one, while a failed spawn never gets one.
@@ -279,6 +340,7 @@ def main() -> int:
         write_status(status)
         auth = Path(env.get("CODEX_HOME", "/nonexistent")) / "auth.json"
         auth.unlink(missing_ok=True)
+        shutil.rmtree(bounds["scratch"], ignore_errors=True)
     log(f"{config.agent} exited with {code}")
     return code
 

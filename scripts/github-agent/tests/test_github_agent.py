@@ -227,6 +227,11 @@ class TestCredentialShapedVariables(unittest.TestCase):
             ["A_ACTION_EXTRA", "B_ACTION_EXTRA", "C_ACTION_EXTRA"],
         )
 
+    def test_leading_whitespace_is_refused_like_the_workflow_gate(self):
+        for padding in (" ", "\n", "\t", "\r\n  "):
+            with self.subTest(padding=repr(padding)):
+                self.assertEqual(credential_shaped_variables({"X_ACTION_EXTRA": padding + "sk-" + "proj-abc"}), ["X_ACTION_EXTRA"])
+
     def test_ordinary_configuration_is_not_flagged(self):
         self.assertEqual(
             credential_shaped_variables(
@@ -591,6 +596,11 @@ class TestCheckoutResolution(unittest.TestCase):
         "> ```\r\n> @claude fix\r\n> ```\r\n",
         "````markdown\n```text\n@claude fix the spelling\n```\n````\n\n@claude review this PR",
         "Use `@claude\nfix the spelling` as an example.\n\n@claude review this PR",
+        # F005 round 3: the only mention sits in a code span crossing lines, or in a list item's fence.
+        "Use `the bot like\n@claude fix the spelling` in docs.",
+        "- Example:\n  ```\n  @claude fix the spelling\n  ```",
+        "1. ```text\n   @claude fix the spelling\n   ```",
+        "- ~~~\n  @claude fix\n  ~~~",
     )
 
     def test_a_quoted_write_command_never_makes_the_branch_writable(self):
@@ -612,11 +622,16 @@ class TestCheckoutResolution(unittest.TestCase):
                 self.assertEqual(parse_request(text, "@claude"), ("review", "this PR"))
                 self.assertEqual(len(agent_lib.mask_code(text)), len(text))
 
-    def test_codex_never_gets_a_writable_checkout(self):
-        for surface, number in (("issue", 7), ("pull_request", 639)):
-            with self.subTest(surface=surface):
-                self.assertFalse(self.resolve(surface, "fix", number=number, agent="codex")["writable"])
-                self.assertTrue(self.resolve(surface, "fix", number=number)["writable"])
+    def test_both_agents_get_a_writable_checkout_for_an_unambiguous_fix(self):
+        for agent in ("claude", "codex"):
+            for surface, number in (("issue", 7), ("pull_request", 639)):
+                with self.subTest(agent=agent, surface=surface):
+                    self.assertTrue(self.resolve(surface, "fix", number=number, agent=agent)["writable"])
+
+    def test_closed_code_before_the_mention_keeps_a_fix_writable(self):
+        for text in ("See `a.py` and ``b`c``. @claude fix it", "Plain text.\n\n@claude fix it"):
+            with self.subTest(text=text):
+                self.assertTrue(self.resolve("pull_request", "fix", text=text)["writable"])
 
     def test_mentions_naming_different_commands_run_read_only(self):
         context = self.resolve("pull_request", "fix", text="@claude fix the typo, then @claude review it")

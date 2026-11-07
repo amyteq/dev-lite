@@ -280,10 +280,11 @@ class TestRouteSettings(unittest.TestCase):
 
 class TestModelSelection(unittest.TestCase):
     def commands(self, variables):
-        claude = run_agent.claude_command(AgentConfig("claude", variables))[0]
+        bounds = {"scratch": "/scratch", "path": "/usr/bin", "git": ["/repo/.git"], "work_dir": "/repo", "read": []}
+        claude = run_agent.claude_command(AgentConfig("claude", variables), False, bounds)[0]
         with patch.dict(os.environ, {"OPENAI_API_KEY": "test-placeholder"}, clear=True), \
                 redirect_stdout(io.StringIO()):
-            codex = run_agent.codex_command(AgentConfig("codex", variables), "/tmp/result.md")[0]
+            codex = run_agent.codex_command(AgentConfig("codex", variables), "/tmp/result.md", bounds)[0]
         return claude, codex
 
     def test_cli_defaults_do_not_receive_an_empty_model_flag(self):
@@ -295,7 +296,8 @@ class TestModelSelection(unittest.TestCase):
         self.assertEqual(claude[claude.index("--model") + 1], "claude-choice")
         self.assertEqual(codex[codex.index("--model") + 1], "codex-choice")
         self.assertNotIn("--dangerously-skip-permissions", claude)
-        self.assertEqual(codex[codex.index("--sandbox") + 1], "read-only")
+        self.assertIn('default_permissions="bounded"', codex)
+        self.assertNotIn("--sandbox", codex)
 
     def test_claude_reports_json_and_receives_an_explicit_effort(self):
         claude, codex = self.commands({"CLAUDE_ACTION_EFFORT": "high", "CODEX_ACTION_EFFORT": "low"})
@@ -378,7 +380,9 @@ class TestRunRecordsTheSession(unittest.TestCase):
                 builder = nullcontext()
             else:
                 builder = patch.object(run_agent, "run", return_value=outcome)
-            with patch.dict(os.environ, env, clear=True), spawn, builder, redirect_stdout(io.StringIO()):
+            # The real worker probe is covered by test_security.BoundedWorker.
+            with patch.dict(os.environ, env, clear=True), spawn, builder, patch.object(run_agent, "probe_worker"), \
+                    redirect_stdout(io.StringIO()):
                 try:
                     code = run_agent.main()
                 except (SystemExit, OSError) as stop:
