@@ -1,0 +1,10 @@
+{
+  "name": "dev-planning",
+  "version": "0.1.0",
+  "description": "Feature and story planning skills: analyse a requirements programme into FT_/STY_ planning docs, tracking issues and labels, and refine one story into a dispatchable issue.",
+  "author": { "name": "amyteq", "url": "https://github.com/amyteq" },
+  "homepage": "https://github.com/amyteq/dev-lite",
+  "repository": "https://github.com/amyteq/dev-lite",
+  "license": "MIT",
+  "keywords": ["planning", "stories", "github", "skills"]
+}

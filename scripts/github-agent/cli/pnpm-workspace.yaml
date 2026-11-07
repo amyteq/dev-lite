@@ -1,0 +1,4 @@
+# A self-contained install root: pnpm must not climb into the checked-out project.
+packages:
+  - .
+allowBuilds: {}

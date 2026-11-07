@@ -1,0 +1,346 @@
+{
+  "schema": "AnalyseRpProposalV1",
+  "_fixture": "Skeleton-backed pack: a shared notification-preferences module, where no current seam exists. Expected: no findings.",
+  "baseline": {
+    "repo": "example-org/example-repo",
+    "ref": "main",
+    "commit": "3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f",
+    "worktree_status_porcelain": "",
+    "request_pack": {
+      "id": "RP-21",
+      "origin": "docs/specs/notifications.md (preferences and entrypoint sections)"
+    },
+    "planning_index": {
+      "digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "counts": {
+        "feat": 1,
+        "story": 0
+      }
+    }
+  },
+  "boundary": {
+    "statement": "The shared notification-preferences seam: one package that resolves a member's layered notification preferences once, for three later notification channels.",
+    "actors": [
+      "notifications implementer",
+      "repository owner"
+    ],
+    "outcomes": [
+      "a single entrypoint exists that all three notification channels can call",
+      "preferences resolve once through a typed, layered, storage-neutral boundary"
+    ],
+    "exclusions": [
+      "the three notification channels themselves",
+      "message delivery, retries, scheduling and analytics",
+      "turning any channel on for members"
+    ]
+  },
+  "path": "skeleton",
+  "journey": [
+    {
+      "id": "J-1",
+      "step": "an implementer calls the shared preferences entrypoint"
+    },
+    {
+      "id": "J-2",
+      "step": "the package resolves one immutable preferences snapshot"
+    },
+    {
+      "id": "J-3",
+      "step": "a channel reads that snapshot instead of reading preferences itself",
+      "deferral": "Downstream of the runway: re-derived against the exact merged skeleton HEAD, so no slice is proposed for it now."
+    }
+  ],
+  "sources": [
+    {
+      "id": "SRC-1",
+      "title": "NTF-01 one shared preferences package",
+      "origin": "docs/specs/reports.md",
+      "included": true,
+      "omission_reason": null
+    },
+    {
+      "id": "SRC-2",
+      "title": "Preference precedence and resolve-once rule",
+      "origin": "docs/specs/notifications.md#precedence",
+      "included": true,
+      "omission_reason": null
+    },
+    {
+      "id": "SRC-3",
+      "title": "NTF-03 clean-rewrite boundary",
+      "origin": "docs/specs/reports.md",
+      "included": true,
+      "omission_reason": null
+    },
+    {
+      "id": "SRC-4",
+      "title": "Archived notification prototype and its settings files",
+      "origin": "archive (historical provenance)",
+      "included": false,
+      "omission_reason": "NTF-03 excludes the archived prototype from imports and acceptance; reading it here would re-import the coupling the rewrite exists to remove."
+    }
+  ],
+  "coverage": [
+    {
+      "source_id": "SRC-1",
+      "disposition": "owned",
+      "unit_id": "U-1"
+    },
+    {
+      "source_id": "SRC-2",
+      "disposition": "owned",
+      "unit_id": "U-2"
+    },
+    {
+      "source_id": "SRC-3",
+      "disposition": "blocked",
+      "reason": "Whether the package may be created on main before the owner approves a rollout plan for notifications is a live authority question, not an engineering choice.",
+      "decision_id": "D-1"
+    }
+  ],
+  "slices": [
+    {
+      "id": "SL-1",
+      "outcome": "A runnable shared entrypoint proves the package boundary with a deterministic smoke path.",
+      "journey_step": "J-1"
+    },
+    {
+      "id": "SL-2",
+      "outcome": "A typed preferences snapshot proves the precedence order against a fake source set.",
+      "journey_step": "J-2"
+    }
+  ],
+  "units": [
+    {
+      "id": "U-1",
+      "slice_id": "SL-1",
+      "kind": "skeleton",
+      "outcomes": [
+        "An implementer can call the shared entrypoint and observe it returning a typed, empty-but-valid snapshot."
+      ],
+      "decision_surface": "The module path and entrypoint signature every later channel calls through.",
+      "seam": "src/notifications/prefs/index.ts and cli.ts, invoked as node src/notifications/prefs/cli.ts",
+      "scope": [
+        "the package entrypoint and executable smoke-path skeleton"
+      ],
+      "non_goals": [
+        "no channel behaviour",
+        "no message delivery",
+        "no state persistence"
+      ],
+      "acceptance": [
+        "node src/notifications/prefs/cli.ts exits zero and prints the resolved snapshot",
+        "an import test proves the package imports nothing from the archived prototype"
+      ],
+      "validation": [
+        "import/architecture test plus an entrypoint smoke test"
+      ],
+      "write_boundary": [
+        "src/notifications/prefs/index.ts",
+        "src/notifications/prefs/cli.ts",
+        "src/notifications/prefs/test/entrypoint.test.ts"
+      ],
+      "rollback": "delete the package directory; nothing imports it until the downstream units exist",
+      "split_rationale": "A skeleton with one independently testable outcome: the entrypoint contract. It is not an empty scaffold - the smoke path and the import test fail if the boundary is wrong.",
+      "owner": "@example-owner",
+      "open_decisions": [
+        "D-1"
+      ],
+      "blockers": [
+        "Blocked on D-1: creating the package on main before a rollout plan exists is an owner decision."
+      ],
+      "provisional": false,
+      "frozen_signatures": false,
+      "tripwires": {
+        "files": 4,
+        "acs": 2,
+        "breached": false,
+        "disposition": null,
+        "owner_gate": null
+      },
+      "home": {
+        "relation": "new",
+        "key": "FT_101",
+        "level": "feat",
+        "evidence": "Fixture: the index has no story whose outcome or seam matches this unit.",
+        "search": [
+          "index rows of FT_101 by observable outcome and seam"
+        ]
+      }
+    },
+    {
+      "id": "U-2",
+      "slice_id": "SL-2",
+      "kind": "skeleton",
+      "outcomes": [
+        "An implementer can resolve one immutable preferences snapshot and see the declared precedence order enforced against deterministic fake sources."
+      ],
+      "decision_surface": "The layered precedence contract and the shape of the resolved snapshot.",
+      "seam": "the typed settings model and its resolve-once function inside the shared package",
+      "scope": [
+        "the typed immutable settings snapshot and deterministic layered resolver skeleton"
+      ],
+      "non_goals": [
+        "no profile registry beyond one fake profile",
+        "no environment-specific defaults",
+        "no live database reads"
+      ],
+      "acceptance": [
+        "each precedence layer overrides the one below it in the declared order",
+        "a preference that mutes a mandatory notice is rejected rather than ignored",
+        "the snapshot is immutable after resolution"
+      ],
+      "validation": [
+        "table-driven precedence tests over fake sources, including the rejection case"
+      ],
+      "write_boundary": [
+        "src/notifications/prefs/resolve.ts",
+        "src/notifications/prefs/test/fixtures/*.json",
+        "src/notifications/prefs/test/resolve.test.ts"
+      ],
+      "rollback": "remove the module and its fixtures; the entrypoint falls back to the empty snapshot from U-1",
+      "split_rationale": "Kept as one unit: precedence and the immutable snapshot are one decision surface, and splitting them would leave a resolver with no defined output or an output type nothing produces - a non-testable half.",
+      "owner": "@example-owner",
+      "open_decisions": [
+        "D-1"
+      ],
+      "blockers": [
+        "Blocked on D-1, same rollout question as U-1."
+      ],
+      "provisional": false,
+      "frozen_signatures": false,
+      "tripwires": {
+        "files": 6,
+        "acs": 3,
+        "breached": false,
+        "disposition": null,
+        "owner_gate": null
+      },
+      "home": {
+        "relation": "new",
+        "key": "FT_101",
+        "level": "feat",
+        "evidence": "Fixture: the index has no story whose outcome or seam matches this unit.",
+        "search": [
+          "index rows of FT_101 by observable outcome and seam"
+        ]
+      }
+    },
+    {
+      "id": "U-3",
+      "slice_id": "SL-2",
+      "kind": "unit",
+      "outcomes": [
+        "A channel reads the resolved snapshot instead of reading preferences itself."
+      ],
+      "decision_surface": "How a notification channel consumes the shared snapshot.",
+      "seam": "the consumer-side accessor between a channel module and the preferences snapshot",
+      "scope": [
+        "provisional consumer access to the merged settings snapshot"
+      ],
+      "non_goals": [
+        "no channel behaviour in this unit",
+        "no second preferences engine"
+      ],
+      "acceptance": [
+        "provisional: a consumer obtains the snapshot through the shared accessor and fails closed when it is absent"
+      ],
+      "validation": [
+        "provisional: consumer test against the merged skeleton's real accessor"
+      ],
+      "write_boundary": [
+        "src/notifications/channels/*.ts"
+      ],
+      "rollback": "provisional: revert the accessor call",
+      "split_rationale": "Provisional downstream unit. Its boundary is proposed from the skeleton's intended contract and is re-derived, not confirmed, after the skeleton merges.",
+      "owner": "@example-owner",
+      "open_decisions": [
+        "D-1"
+      ],
+      "blockers": [
+        "Provisional: acceptance criteria and signatures cannot be finalized until the skeleton HEAD is merged and reconciled."
+      ],
+      "provisional": true,
+      "frozen_signatures": false,
+      "tripwires": {
+        "files": 2,
+        "acs": 1,
+        "breached": false,
+        "disposition": null,
+        "owner_gate": null
+      },
+      "home": {
+        "relation": "new",
+        "key": "FT_101",
+        "level": "feat",
+        "evidence": "Fixture: the index has no story whose outcome or seam matches this unit.",
+        "search": [
+          "index rows of FT_101 by observable outcome and seam"
+        ]
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "U-2",
+      "to": "U-1",
+      "type": "contract",
+      "blocks_pickup": true,
+      "reason": "The settings module lives inside the package boundary U-1 establishes and is reached through its entrypoint; there is no module path to write against until that exists.",
+      "evidence": "NTF-01 requires one entrypoint at src/notifications/prefs/ with no second preferences engine"
+    },
+    {
+      "from": "U-3",
+      "to": "U-2",
+      "type": "contract",
+      "blocks_pickup": true,
+      "reason": "The consumer reads the resolved snapshot type; the accessor signature is exactly what Pass 2 must reconcile against the merged skeleton.",
+      "evidence": "resolve-once rule: preferences resolve once and channels read the immutable snapshot"
+    },
+    {
+      "from": "U-3",
+      "to": "U-1",
+      "type": "qualification",
+      "blocks_pickup": false,
+      "reason": "The architecture test that proves no second preferences engine runs over the consumer too, which gates release qualification rather than pickup of U-3.",
+      "evidence": "NTF-01 minimum acceptance evidence: import/architecture tests across all channels"
+    }
+  ],
+  "decisions": [
+    {
+      "id": "D-1",
+      "question": "May the src/notifications/prefs package be created on main before the owner approves a rollout plan, and on which branch?",
+      "status": "needed",
+      "owner": null,
+      "evidence": null
+    }
+  ],
+  "downstream": {
+    "provisional": true,
+    "units": [
+      "U-3",
+      "and the notification channels outside this boundary"
+    ],
+    "trigger": {
+      "kind": "merged_skeleton_head",
+      "commit": null,
+      "description": "Re-derive downstream acceptance criteria and accessor signatures against the exact merged HEAD of the skeleton units U-1 and U-2, in a separately authorized run."
+    }
+  },
+  "verdict": {
+    "state": "proposal_blocked",
+    "next_human_action": "Owner settles D-1: whether the shared package may be created ahead of a rollout plan, and on which branch.",
+    "evidence_limits": "No skeleton has been implemented or merged, so every downstream signature here is proposed, not confirmed; the package does not exist at the baseline commit."
+  },
+  "review": {
+    "reviewer": "Fresh-context independent reviewer, given the baseline, source manifest, packet, projection and checker output.",
+    "verdict": "sound",
+    "findings": []
+  },
+  "homes": [
+    {
+      "key": "FT_101",
+      "level": "feat"
+    }
+  ]
+}
