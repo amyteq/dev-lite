@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -113,7 +114,7 @@ INTERPRETERS = {
 
 # A word in command position: start, or after a pipe/separator/substitution,
 # optionally preceded by VAR=value assignments.
-COMMAND_POSITION = re.compile(r"(?:^|[|;&\n]|\$\(|`)\s*(?:\w+=\S+\s+)*(?P<program>[\w./-]+)")
+COMMAND_POSITION = re.compile(r"(?:^|[|;&\n(]|`)\s*(?:\w+=\S+\s+)*(?P<program>[\w./-]+)")
 
 # The literal value of a message-carrying flag. Single quotes never expand; double
 # quotes count only without `$`, backtick or backslash, so a payload that could
@@ -158,8 +159,10 @@ def strip_heredoc_bodies(command: str) -> str:
         while end < len(lines) and lines[end].strip() != tag:
             end += 1
         body = lines[index:end]
-        programs = list(COMMAND_POSITION.finditer(line[: opener.start()]))
-        sink = bool(programs) and Path(programs[-1].group("program")).name in DATA_SINKS
+        # The body reaches every program of the opener's pipeline, so each must only store or forward it.
+        pipeline = [part for part in re.split(r"&&|\|\||;|(?<![|>])&(?!>)", line) if opener.group(0) in part][0]
+        programs = [Path(match.group("program")).name for match in COMMAND_POSITION.finditer(pipeline)]
+        sink = bool(programs) and set(programs) <= DATA_SINKS and not line.rstrip().endswith(("|", "\\"))
         literal = bool(opener.group("quote")) or not EXPANDABLE.search("\n".join(body))
         if not (sink and literal):
             kept.extend(body)
@@ -170,41 +173,173 @@ def strip_heredoc_bodies(command: str) -> str:
     return "\n".join(kept)
 
 
-def normalize_command(command: str) -> str:
+def normalize_command(command: str, keep_lines: bool = False) -> str:
     """Canonicalise a command for matching: inert payloads out, gh flag noise out."""
     text = strip_heredoc_bodies(command)
     text = LITERAL_MESSAGE_PAYLOAD.sub(" ", text)
     text = GH_LEADING_FLAGS.sub("gh", text)
-    return compact(text)
+    return text if keep_lines else compact(text)
 
 
-# `rm` arguments up to the next separator; matched on the lower-cased command.
-RM_ARGS = re.compile(r"\brm\b([^|;&\n]*)")
-# `$TMPDIR/`, `${TMPDIR}/`, `"$TMPDIR"/` or `"$TMPDIR/` (lower-cased).
-TMPDIR_PREFIX = re.compile(r'^"?\$(?:tmpdir|\{tmpdir\})"?/')
+# --- shell structure ----------------------------------------------------------
+#
+# The rules below read words as the shell splits and unquotes them, so `"--force"`,
+# `git -C repo push` and `-T.env.production` are the same commands as their plain
+# spellings. Unbalanced quoting cannot be read that way and asks instead.
+
+SHELL_KEYWORDS = {"!", "{", "}", "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "time"}
+# Programs that run the program named in their arguments.
+WRAPPERS = {"env", "command", "builtin", "exec", "nohup", "nice", "timeout", "xargs", "stdbuf", "sudo", "doas"}
+SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "ash"}
+ASSIGNMENT = re.compile(r"^[A-Za-z_]\w*=")
+
+
+def simple_commands(command: str) -> list[list[str]]:
+    """The words of each simple command, unquoted; raises ValueError on unbalanced quoting."""
+    # A substitution's command is a command too; splitting at it only adds commands.
+    text = command.replace("`", " ; ").replace("$(", " ; ( ")
+    lexer = shlex.shlex(text, posix=True, punctuation_chars=";&|()<>\n")
+    lexer.whitespace = " \t\r"
+    lexer.whitespace_split = True
+    lexer.commenters = ""  # a `#` word is kept: reading more words only adds matches
+    commands, words = [], []
+    for token in lexer:
+        if token and set(token) <= set(";&|()\n"):
+            commands.append(words)
+            words = []
+        else:
+            words.append(token)
+    return [words for words in commands + [words] if words]
+
+
+def invocations(command: str, names: set[str], depth: int = 0) -> list[list[str]]:
+    """Arguments of every call to a program in `names`, also through wrappers, `sh -c` and `eval`."""
+    found = []
+    for words in simple_commands(command):
+        index = 0
+        while index < len(words) and (words[index] in SHELL_KEYWORDS or ASSIGNMENT.match(words[index])
+                                      or set(words[index]) <= set("<>&")):
+            index += 2 if set(words[index]) <= set("<>&") else 1
+        words = words[index:]
+        program = Path(words[0]).name if words else ""
+        if program in names:
+            found.append(words[1:])
+        elif program in WRAPPERS:
+            later = [i for i, word in enumerate(words) if Path(word).name in names]
+            found.extend([words[later[0] + 1:]] if later else [])
+        elif depth < 3 and program == "eval":
+            found.extend(invocations(" ".join(words[1:]), names, depth + 1))
+        elif depth < 3 and program in SHELLS:
+            # `sh -c SCRIPT`, also with bundled options such as `bash -lc SCRIPT`.
+            flag = next((i for i, word in enumerate(words[1:-1], 1) if re.fullmatch(r"-[a-z]*c[a-z]*", word)), None)
+            found.extend(invocations(words[flag + 1], names, depth + 1) if flag else [])
+    return found
+
+
+# Git options before the subcommand that take a separate value.
+GIT_VALUE_OPTIONS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"}
+PUSH_VALUE_OPTIONS = {"--repo", "--receive-pack", "--exec", "--push-option", "-o"}
+FORCE_OPTIONS = ("--force", "--force-with-lease", "--mirror")
+DELETE_OPTIONS = ("--delete", "--prune")
+
+
+def push_decision(command: str) -> tuple[str | None, str | None]:
+    """Deny a force push or remote deletion in any spelling Git accepts; ask when config could imply one."""
+    for args in invocations(command, {"git"}):
+        index, configured = 0, False
+        while index < len(args) and args[index].startswith("-"):
+            name = args[index].split("=", 1)[0]
+            configured |= name in ("-c", "--config-env")
+            index += 2 if name in GIT_VALUE_OPTIONS and "=" not in args[index] else 1
+        if args[index:index + 1] != ["push"]:
+            continue
+        force = delete = ended = False
+        positional, rest = [], iter(args[index + 1:])
+        for word in rest:
+            if ended or not word.startswith("-") or word == "-":
+                positional.append(word)
+            elif word == "--":
+                ended = True
+            elif word.startswith("--"):
+                name = word.split("=", 1)[0]
+                if name.startswith("--no-"):
+                    continue
+                # Git accepts any unambiguous prefix of a long option.
+                force |= any(option.startswith(name) for option in FORCE_OPTIONS) and len(name) > 3
+                delete |= any(option.startswith(name) for option in DELETE_OPTIONS + ("--mirror",)) and len(name) > 3
+                if name in PUSH_VALUE_OPTIONS and "=" not in word:
+                    next(rest, None)
+            else:
+                for position, letter in enumerate(word[1:], 1):
+                    if letter == "o":  # `-o` takes the rest of the word, or the next word, as its value
+                        if position == len(word) - 1:
+                            next(rest, None)
+                        break
+                    force |= letter == "f"
+                    delete |= letter == "d"
+        # The repository is positional only without `--repo`; no remote name starts with `+` or `:`.
+        force |= any(word.startswith("+") for word in positional)
+        delete |= any(word.startswith(":") for word in positional)
+        if force:
+            return "deny", "Refusing force push."
+        if delete:
+            return "deny", "Refusing remote branch deletion (preserve published branch history)."
+        if configured:
+            return "ask", "A push with command-line Git configuration requires approval."
+    return None, None
 
 
 def temp_roots() -> list[str]:
     """/tmp, plus $TMPDIR only when it is set to an absolute path other than `/`."""
     tmpdir = os.path.normpath(os.environ.get("TMPDIR") or ".")
-    return ["/tmp"] + ([tmpdir.lower()] if os.path.isabs(tmpdir) and tmpdir != "/" else [])
+    return ["/tmp"] + ([tmpdir] if os.path.isabs(tmpdir) and tmpdir != "/" else [])
 
 
-def rm_targets_only_temp(lc: str) -> bool:
-    """True when every `rm` in the command removes only paths strictly inside /tmp or $TMPDIR."""
+TMPDIR_PREFIX = re.compile(r"^\$(?:TMPDIR|\{TMPDIR\})/")
+
+
+def rm_targets_only_temp(command: str) -> bool:
+    """True when every `rm` removes only paths strictly inside /tmp or the hook's own $TMPDIR.
+
+    Case is kept, and a command that may change TMPDIR for the shell leaves `$TMPDIR` unresolved.
+    """
     roots = temp_roots()
-    for args in RM_ARGS.findall(lc):
-        targets = [token for token in args.split() if not token.startswith("-")]
+    calls = invocations(command, {"rm"})
+    words = [Path(word).name for words in simple_commands(command) for word in words]
+    if not calls or words.count("rm") != len(calls):
+        return False  # an `rm` this reading did not resolve, such as `find -exec rm`
+    redefined = re.search(r"(?<![$\w{])TMPDIR(?!\w)", command) is not None
+    for args in calls:
+        targets = [arg for index, arg in enumerate(args) if not arg.startswith("-") or "--" in args[:index]]
         if not targets:
             return False
         for target in targets:
             prefix = TMPDIR_PREFIX.match(target)
-            if prefix and len(roots) < 2:
-                return False  # an empty or unusable $TMPDIR expands to a path under `/`
-            path = (roots[-1] + "/" + target[prefix.end():] if prefix else target).replace('"', "").rstrip("/")
-            if ".." in target or not any(path.startswith(root + "/") for root in (roots[-1:] if prefix else roots)):
+            if prefix and (len(roots) < 2 or redefined):
+                return False  # $TMPDIR is empty, unusable or not the hook's value
+            path = (roots[-1] + "/" + target[prefix.end():] if prefix else target).rstrip("/")
+            if ".." in target or "$" in path or "~" in target[:1] or \
+                    not any(path.startswith(root + "/") for root in (roots[-1:] if prefix else roots)):
                 return False
     return True
+
+
+# A transfer or read operand may be attached to its option (`-T.env.production`,
+# `--upload-file=x`), prefixed by `@` or `<`, or follow a `host:` part.
+TRANSFER_PROGRAMS = {"curl", "wget", "scp", "rsync", "sftp"}
+READ_PROGRAMS = {"cat", "less", "more", "head", "tail", "grep", "rg", "awk", "sed", "xxd", "od", "strings", "base64"}
+
+
+def operand_forms(word: str) -> set[str]:
+    forms = {word, word.split("=", 1)[-1], word.split(":", 1)[-1], word.rsplit("@", 1)[-1], word.lstrip("@<")}
+    if word.startswith("-") and not word.startswith("--"):
+        forms |= {word[2:], word[2:].lstrip("@<")}
+    return {form for form in forms if form}
+
+
+def protected_operand(command: str, programs: set[str]) -> bool:
+    return any(path_is_protected(form) for args in invocations(command, programs) for word in args
+               for form in operand_forms(word))
 
 
 # The shell rules use the file tools' policy: a fragment matches from a path boundary
@@ -225,13 +360,6 @@ DENY_PATTERNS = [
     (r"\bdd\s+.*\bof=/dev/", "Refusing raw disk write."),
     (r"\bmkfs(\.|\s|$)", "Refusing filesystem formatting command."),
     (r"\bshutdown\b|\breboot\b|\bhalt\b", "Refusing host power command."),
-    # The flag is legal anywhere in the push: `git push origin main --force`. A `+`
-    # refspec and a bundled short option (`-uf`) force the same update.
-    (r"\bgit\s+push\b[^|;&]*?\s(-[a-z0-9]*f[a-z0-9]*|--force|--force-with-lease|--mirror|\+\S)", "Refusing force push."),
-    (
-        r"\bgit\s+push\b[^|;&]*?\s(-[a-z0-9]*d[a-z0-9]*\b|--delete\b|--prune\b|:\S)",
-        "Refusing remote branch deletion (preserve published branch history).",
-    ),
     (r"\bgit\s+filter-(branch|repo)\b", "Refusing history rewrite."),
     (
         r"\bgh\s+(issue|label|release|repo|secret|variable|webhook|ssh-key|gpg-key|cache|run)\s+delete\b",
@@ -247,7 +375,8 @@ DENY_PATTERNS = [
         r"\b(curl|wget|scp|rsync)\b.*(" + SECRET_PATHS + r"|metadata\.google|169\.254\.169\.254)",
         "Refusing shell exfiltration/metadata access pattern.",
     ),
-    (r"\b(psql|sqlite3|mysql)\b.*\b(drop\s+database|drop\s+schema)\b", "Refusing database/schema drop from the agent."),
+    # In either order: a heredoc piped into the client puts the statement first.
+    (r"^(?=.*\b(psql|sqlite3|mysql)\b).*\b(drop\s+database|drop\s+schema)\b", "Refusing database/schema drop from the agent."),
 ]
 
 ASK_PATTERNS = [
@@ -255,19 +384,37 @@ ASK_PATTERNS = [
     (r"\bfind\b.*\s-delete\b", "find -delete requires approval."),
     (r"\bgit\s+clean\b", "git clean requires approval."),
     (r"\bsupabase\s+db\s+(push|reset)\b", "Remote/destructive Supabase database operation requires approval."),
-    (r"\b(psql|sqlite3|mysql)\b.*\b(truncate|delete\s+from)\b", "Destructive SQL requires approval."),
+    (r"^(?=.*\b(psql|sqlite3|mysql)\b).*\b(truncate|delete\s+from)\b", "Destructive SQL requires approval."),
     (r"\bdocker\s+compose\s+down\b.*\s-v\b", "Docker volume deletion requires approval."),
 ]
 
 
+# Words whose command the structural rules must read; unreadable quoting around one asks.
+STRUCTURAL_WORDS = re.compile(r"\b(?:push|rm|curl|wget|scp|rsync|sftp|cat|less|more|head|tail|grep|rg|awk|sed|xxd|od|strings|base64)\b")
+
+
 def bash_decision(command: str) -> tuple[str | None, str | None]:
     lc = normalize_command(command).lower()
+    text = normalize_command(command, keep_lines=True)
 
     for pattern, reason in DENY_PATTERNS:
         if re.search(pattern, lc, flags=re.IGNORECASE):
             return "deny", reason
 
-    if re.search(r"\brm\b", lc) and not rm_targets_only_temp(lc):
+    try:
+        decision = push_decision(text)
+        if decision[0]:
+            return decision
+        if protected_operand(text, READ_PROGRAMS):
+            return "deny", "Refusing shell read of protected secrets."
+        if protected_operand(text, TRANSFER_PROGRAMS):
+            return "deny", "Refusing shell exfiltration/metadata access pattern."
+        removes_outside_temp = re.search(r"\brm\b", lc) and not rm_targets_only_temp(text)
+    except ValueError:
+        if STRUCTURAL_WORDS.search(lc):
+            return "ask", "This command's quoting cannot be read safely; split or simplify it."
+        removes_outside_temp = False
+    if removes_outside_temp:
         return "ask", "File deletion outside /tmp or $TMPDIR requires approval."
     for pattern, reason in ASK_PATTERNS:
         if re.search(pattern, lc, flags=re.IGNORECASE):

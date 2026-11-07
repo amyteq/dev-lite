@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+from publish_changes import check_reply_content
 
 
 def main():
@@ -22,6 +23,8 @@ def main():
             raise ValueError('Invalid agent status')
         if status['exit_code'] == 0 and (not (root / 'result.md').exists() or not (root / 'result.md').read_text().strip()):
             raise ValueError('Successful agent status has no reply')
+        if (root / 'result.md').exists():
+            check_reply_content((root / 'result.md').read_bytes())
         for field in ('model', 'effort', 'started', 'elapsed', 'agent', 'command'):
             if field in status and (not isinstance(status[field], str) or len(status[field]) > 300):
                 raise ValueError(f'Invalid status field: {field}')

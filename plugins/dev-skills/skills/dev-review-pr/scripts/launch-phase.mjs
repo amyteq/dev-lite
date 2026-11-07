@@ -81,7 +81,8 @@ const git = async (worktree, args, timeoutSeconds) => {
 // model/effort/profile arguments select existing capabilities without copying machine configuration.
 function launchCommand(request) {
   if (request.provider === 'claude') {
-    const tools = request.role === 'reviewer' ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash';
+    // No role gets a shell: a check runs PR code, which could read the operator's login (references/agents.md).
+    const tools = request.role === 'reviewer' ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write';
     return { command: 'claude', args: ['-p', ...(request.model ? ['--model', request.model] : []),
       // `claude -p` starts in the default mode and denies writer edits unless a mode is passed; a plugin cannot rely on the
       // consumer repository's settings to set one.
@@ -92,7 +93,7 @@ function launchCommand(request) {
   return { command: 'codex', args: ['exec', '--color', 'never', '-C', request.worktree,
     ...(request.profile ? ['--profile', request.profile] : []), ...(request.model ? ['-m', request.model] : []),
     ...(request.effort ? ['-c', `model_reasoning_effort="${request.effort}"`] : []),
-    '-s', request.role === 'reviewer' ? 'read-only' : 'workspace-write', '--ephemeral', '-'] };
+    '-s', 'read-only', '--ephemeral', '-'] };
 }
 
 // Codex prints its session header between the first two dashed lines on stderr; anything
@@ -148,27 +149,14 @@ function unwrapReport(text) {
     ? { blocker: 'report: the result is wrapped in two code fences' } : { text: inner };
 }
 
-// The directories a commit writes: the worktree's own, and a linked worktree's common one.
-const gitDirs = async (worktree, probeSeconds) => ((await git(worktree, ['rev-parse', '--absolute-git-dir', '--path-format=absolute', '--git-common-dir'], probeSeconds)) ?? '').split('\n');
-
-const real = (path) => { try { return realpathSync(path); } catch { return path; } };
-// Writable by the child: this process can write the path, and it lies inside a root the sandbox opens.
-const writableIn = (path, roots) => { try { accessSync(path, constants.W_OK); } catch { return false; }
-  return roots.some((root) => real(path) === root || real(path).startsWith(`${root.replace(/\/$/, '')}/`)); };
+const writable = (path) => { try { accessSync(path, constants.W_OK); return true; } catch { return false; } };
 
 // Each writer operation is checked before its phase is spent, and recorded as what the check established, not as a
-// permission the helper cannot observe. A Codex writer never commits: under `workspace-write` the Git directories are
-// read-only even inside the workdir, so the coordinator commits for it. A Claude writer's commit is this process's host
-// write access to those directories, which cannot see a Claude Code sandbox. The paths a phase writes are unknown
-// until it runs and no local check reaches a push transport, so neither is reported as permitted. Only an unwritable
-// worktree refuses: a writer that cannot commit or push still leaves a change the coordinator can land.
+// permission the helper cannot observe. A writer has no shell, so the coordinator commits its change. No local check
+// reaches a push transport, so a push is never reported as permitted. Only an unwritable worktree refuses.
 async function writerPermissions(request, probeSeconds) {
-  const claude = request.provider === 'claude';
-  const roots = claude ? ['/'] : [real(request.worktree)];
-  const dirs = claude ? await gitDirs(request.worktree, probeSeconds) : [];
   const remote = request.push && await git(request.worktree, ['remote', 'get-url', '--push', request.push], probeSeconds);
-  return { edit: writableIn(request.worktree, roots) ? 'writable' : 'not-writable',
-    commit: !claude ? 'coordinator-required' : dirs.every((dir) => dir && writableIn(dir, roots)) ? 'writable' : 'not-writable',
+  return { edit: writable(request.worktree) ? 'writable' : 'not-writable', commit: 'coordinator-required',
     push: !request.push ? 'not-granted' : remote ? 'granted-transport-unverified' : 'no-such-remote' };
 }
 
@@ -213,6 +201,8 @@ async function runPhase(request) {
   } else if ((await git(request.worktree, ['status', '--porcelain'], probeSeconds)) !== '') {
     record.blockers.push('dirty-worktree: the worktree has uncommitted changes or its status is unreadable');
   }
+  // Codex cannot edit without running commands, and its commands can read the operator's Codex login.
+  if (request.role === 'writer' && route.cli === 'codex') record.blockers.push('codex-writer: a Codex writer runs PR code next to the operator\'s login; use a Claude writer');
   if (!record.blockers.length && request.role === 'writer') record.permissions = await writerPermissions(request, probeSeconds);
   if (record.permissions?.edit === 'not-writable') record.blockers.push('writer-permission: the worktree is not writable, so the phase could produce no change');
   if (timeouts.length || record.blockers.length) return finish('refused');

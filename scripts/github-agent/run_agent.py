@@ -13,8 +13,10 @@ discussions, and so that both can authenticate with OAuth:
   fallback for anyone who prefers key auth.
 
 The authorized model runs without GitHub mutation credentials in a disposable
-execution job. Read-only requests restrict local tools/sandbox; writable work is
-collected as a patch for validation in a fresh, trusted publisher job.
+execution job, and the session that holds the provider credential never runs
+checkout commands: anything it spawns runs as the same user and could read that
+credential (README "Trust boundary"). Writable work is collected as a patch for
+validation in a fresh, trusted publisher job; checks run on the draft PR.
 
 The status file also carries what the reply signature needs: the start time, the
 measured duration, and the model and effort the CLI itself reported. Prompt text
@@ -42,7 +44,17 @@ from agent_lib import load_config, load_context, log, warn  # noqa: E402
 
 # Both CLIs read the prompt from stdin: a long thread as one argument exceeds the
 # kernel's per-argument limit (E2BIG) before the CLI starts.
-def claude_command(config) -> tuple[list[str], dict[str, str], str]:
+# Claude's built-in tools without command execution, web access or subagents. The
+# credential is in the CLI's own environment, so reads of /proc are refused too.
+READ_TOOLS = ("Read", "Glob", "Grep")
+EDIT_TOOLS = READ_TOOLS + ("Edit", "Write")
+
+
+def claude_command(config, writable: bool = False) -> tuple[list[str], dict[str, str], str]:
+    tools = EDIT_TOOLS if writable else READ_TOOLS
+    allowed = {tool.strip() for tool in config.get("ALLOWED_TOOLS").split(",") if tool.strip()}
+    if allowed:
+        tools = tuple(tool for tool in tools if tool in allowed)
     argv = [
         "claude",
         "-p",
@@ -53,17 +65,14 @@ def claude_command(config) -> tuple[list[str], dict[str, str], str]:
         "--setting-sources", "",
         "--strict-mcp-config",
         "--no-session-persistence",
+        "--tools", ",".join(tools),
+        "--permission-mode", "acceptEdits" if writable else "dontAsk",
+        "--disallowedTools", "Read(//proc/**)",
     ]
     if config.get("MODEL"):
         argv.extend(["--model", config.get("MODEL")])
     if config.get("EFFORT"):
         argv.extend(["--effort", config.get("EFFORT")])
-    allowed = config.get("ALLOWED_TOOLS")
-    if allowed:
-        argv.append("--allowedTools")
-        argv.extend(tool.strip() for tool in allowed.split(",") if tool.strip())
-    else:
-        argv.append("--dangerously-skip-permissions")
     # Claude prints one JSON result on stdout: the final message plus the models it used.
     return argv, {}, "stdout"
 
@@ -92,23 +101,18 @@ def codex_command(config, result_file: str) -> tuple[list[str], dict[str, str], 
             "Run `codex login` locally and store ~/.codex/auth.json as the CODEX_AUTH_JSON secret."
         )
 
+    # Codex cannot run without executing commands, so it only ever answers: its
+    # read-only sandbox has no network and normalize_event never makes it writable.
     argv = [
         "codex",
         "exec",
         "--ignore-user-config", "--ignore-rules", "--ephemeral",
+        "--sandbox", "read-only",
         "--output-last-message",
         result_file,
     ]
     if config.get("MODEL"):
         argv.extend(["--model", config.get("MODEL")])
-    sandbox = config.get("SANDBOX")
-    if sandbox == "danger-full-access":
-        argv.append("--dangerously-bypass-approvals-and-sandbox")
-    else:
-        argv.extend(["--sandbox", sandbox])
-        if sandbox == "workspace-write":
-            # Authorized implementation may install dependencies and run local checks.
-            argv.extend(["-c", "sandbox_workspace_write.network_access=true"])
     effort = config.get("EFFORT")
     if effort:
         argv.extend(["-c", f"model_reasoning_effort={effort}"])
@@ -253,21 +257,9 @@ def main() -> int:
     env = {}
     try:
         if config.agent == "claude":
-            argv, env, capture = claude_command(config)
+            argv, env, capture = claude_command(config, bool(context.get("writable")))
         else:
             argv, env, capture = codex_command(config, result_file)
-        if not context.get("writable"):
-            if config.agent == "claude":
-                argv.extend(["--tools", "Read,Glob,Grep", "--permission-mode", "dontAsk"])
-                if "--dangerously-skip-permissions" in argv:
-                    argv.remove("--dangerously-skip-permissions")
-            else:
-                if "--dangerously-bypass-approvals-and-sandbox" in argv:
-                    argv.remove("--dangerously-bypass-approvals-and-sandbox")
-                if "--sandbox" in argv:
-                    argv[argv.index("--sandbox") + 1] = "read-only"
-                else:
-                    argv[-1:-1] = ["--sandbox", "read-only"]
         process = launch(argv, env, work_dir, capture)
         # The process exists from here on: record its start at once, so a run the
         # job timeout kills still has one, while a failed spawn never gets one.

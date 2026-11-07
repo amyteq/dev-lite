@@ -36,7 +36,18 @@ Codex lists plugin skills as `dev-skills:dev-review-pr`. Codex does not install 
 
 ## Versions
 
-Releases are tagged `vX.Y.Z`, and the major tag (`v0`) moves to the latest release of that major line. Reference `@v0` to receive compatible updates, or pin an exact tag (`@v0.1.0`) or commit. Each plugin's `version` in `.claude-plugin/plugin.json` must change for installed copies to update. See [CHANGELOG.md](CHANGELOG.md).
+Releases are tagged `vX.Y.Z`, and the major tag (`v0`) moves to the latest release of that major line. Reference `v0` to receive compatible updates, or pin an exact tag (`v0.1.0`). Each plugin's `version` in `.claude-plugin/plugin.json` must change for installed copies to update. See [CHANGELOG.md](CHANGELOG.md).
+
+To pin a commit, use the full 40-character SHA where each tool accepts one:
+
+- **Claude Code** reads the `#…` suffix of a marketplace URL, and a marketplace `ref`, as a branch or tag only; a SHA there fails as a missing branch. Pin each plugin instead, in a marketplace of your own (for example a project `.claude-plugin/marketplace.json`), with a `git-subdir` source and its `sha`:
+
+  ```json
+  { "name": "dev-skills", "source": { "source": "git-subdir", "url": "https://github.com/amyteq/dev-lite.git", "path": "plugins/dev-skills", "sha": "<full commit SHA>" } }
+  ```
+
+- **Codex** accepts a SHA as the marketplace ref: `codex plugin marketplace add amyteq/dev-lite --ref <full commit SHA>`.
+- **The Ask workflow** accepts a SHA after `@` in the caller's `uses:`.
 
 ## Develop
 

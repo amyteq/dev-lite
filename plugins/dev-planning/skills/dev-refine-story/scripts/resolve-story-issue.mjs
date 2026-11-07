@@ -4,11 +4,13 @@
 //
 // A Story's issue is an open issue whose body's first line is this skill's origin marker for the
 // Story and whose author holds write access, since anyone who can open an issue can copy a marker.
-// Nothing else selects an issue or blocks a create, and every absent or unreadable input stops
-// instead of defaulting. See references/resolver-contract.md.
+// A marker issue whose author lacks write access now may still be the original, so it blocks a
+// create until a maintainer names the original. Every absent or unreadable input stops instead of
+// defaulting. See references/resolver-contract.md.
 //
 // CLI:  node resolve-story-issue.mjs <input.json>   (or `-` for stdin)
-// Exit: 0 for reuse/create, 3 for stop, 2 for malformed input.
+//       node resolve-story-issue.mjs authors <lookup.json> STY_<n>   (marker authors, one per line)
+// Exit: 0 for reuse/create/authors, 3 for stop, 2 for malformed input.
 import { readFileSync, realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
@@ -206,11 +208,52 @@ function readRows(candidates, repoKey, key) {
 }
 
 const trusted = (c) => typeof c.author === 'string' && CREATE_PERMISSIONS.has(c.author.trim().toLowerCase());
+const writer = (raw) => typeof raw === 'string' && CREATE_PERMISSIONS.has(raw.trim().toLowerCase());
+
+// The logins whose permission Step 2 must fetch: authors of rows this parser reads as a marker for the
+// key, so the listing and the decision cannot disagree about which rows carry one.
+export function markerAuthors(lookup, key) {
+  const rows = Array.isArray(lookup?.candidates) ? lookup.candidates : [];
+  return [...new Set(rows.filter((c) => markerOf(c?.body, key) !== null).map((c) => c?.author?.login)
+    .filter((login) => typeof login === 'string' && login))].sort();
+}
+
+// A maintainer's identification of the original issue, verified against this listing: it must name this
+// Story and an open issue whose first line is its marker, and come from someone with write access.
+function selectedByMaintainer(input, key, marked, selection) {
+  const story = parseStoryKey(selection?.story);
+  const number = issueNumber(selection?.issue);
+  const open = marked.map((c) => c.number);
+  if (!story.ok || story.key !== key || number === null) {
+    return STOP('SELECTION_MISMATCH', `The maintainer selection ${JSON.stringify(selection)} does not name ${key} and one issue number.`, open);
+  }
+  if (!writer(input?.authority?.effectivePermission)) {
+    return STOP('INSUFFICIENT_PERMISSION', `Naming ${key}'s original issue needs write access; pass the selecting maintainer's permission as \`authority.effectivePermission\`.`);
+  }
+  const hit = marked.find((c) => c.number === number);
+  if (!hit) {
+    return STOP('SELECTION_MISMATCH', `#${number} is not an open issue whose first line is ${key}'s origin marker${open.length ? `; those are ${ids(open)}` : ''}.`, open);
+  }
+  if (hit.locked) return STOP('ISSUE_LOCKED', `${key}'s selected issue #${number} is locked; no write is attempted and no replacement is created.`, [number]);
+  const duplicates = open.filter((n) => n !== number);
+  return {
+    action: 'reuse',
+    reasonCode: 'REUSE_SELECTED',
+    reason: `Reusing #${number}, which a maintainer named as ${key}'s original issue and which still carries its origin marker${duplicates.length ? `; ${ids(duplicates)} also carry it and are reported for a human` : ''}.`,
+    issue: { number, url: hit.url },
+    selected: number,
+    selection: { story: key, issue: number },
+    duplicates,
+    conflicts: [],
+    plannedWrites: { createIssue: 0, invokeRefineIssue: 1 },
+  };
+}
 
 // The Story's issue is its one open marker issue by an author with write access. Marker issues by
 // anyone else are reported as `duplicates`, never selected; two or more eligible ones stop for a human.
 function decide(input, key, issues) {
   const marked = issues.filter((c) => c.open && c.marker === 'marked').sort((a, b) => a.number - b.number);
+  if (input?.selection !== undefined && input?.selection !== null) return selectedByMaintainer(input, key, marked, input.selection);
   const eligible = marked.filter(trusted);
   const duplicates = marked.filter((c) => !trusted(c)).map((c) => c.number);
   const copies = duplicates.length ? `; ${ids(duplicates)} also carry the marker but were opened without write access, so they are reported for a human` : '';
@@ -232,6 +275,11 @@ function decide(input, key, issues) {
       plannedWrites: { createIssue: 0, invokeRefineIssue: 1 },
     };
   }
+  // The original's author may have lost write access or deleted their account, which no listing can
+  // tell apart from a copy, so no marker issue of uncertain provenance ever leads to a create.
+  if (duplicates.length) {
+    return STOP('MARKER_PROVENANCE_UNCERTAIN', `${ids(duplicates)} carry ${key}'s origin marker, but no author still has write access, so the original cannot be told from a copy. A maintainer must name the original: re-run with \`original=<number>\` for one of them.`, duplicates);
+  }
   if (input?.authority?.createAuthorized !== true) {
     return STOP('CREATE_NOT_AUTHORIZED', `No open issue by an author with write access carries ${key}'s origin marker and this run holds no explicit creation authority.`);
   }
@@ -246,10 +294,10 @@ function decide(input, key, issues) {
   return {
     action: 'create',
     reasonCode: 'CREATE_AUTHORIZED',
-    reason: `No open issue by an author with write access carries ${key}'s origin marker after a complete lookup, and creation is explicitly authorized; write the marker as the new issue's first body line${copies}.`,
+    reason: `No open issue carries ${key}'s origin marker after a complete lookup, and creation is explicitly authorized; write the marker as the new issue's first body line.`,
     issue: null,
     selected: null,
-    duplicates,
+    duplicates: [],
     conflicts: [],
     plannedWrites: { createIssue: 1, invokeRefineIssue: 1 },
   };
@@ -258,7 +306,18 @@ function decide(input, key, issues) {
 // ── CLI ────────────────────────────────────────────────────────────────────────
 // Resolve symlinks: through a linked skill directory a plain comparison imports this file and exits 0 unchecked.
 const isEntry = (() => { try { return import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href; } catch { return false; } })();
-if (isEntry) {
+if (isEntry && process.argv[2] === 'authors') {
+  try {
+    const key = parseStoryKey(process.argv[4]);
+    if (!key.ok) throw new Error(`${process.argv[4]} is not a Story key`);
+    const authors = markerAuthors(JSON.parse(readFileSync(process.argv[3], 'utf8')), key.key);
+    if (authors.length) console.log(authors.join('\n'));
+    process.exit(0);
+  } catch (e) {
+    console.error(`resolve-story-issue: unreadable input (${String(e?.message || e)})`);
+    process.exit(2);
+  }
+} else if (isEntry) {
   const arg = process.argv[2];
   const read = async () => {
     if (!arg || arg === '-') {

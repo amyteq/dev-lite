@@ -105,14 +105,33 @@ jobs:
           path: .agent-tools
           sparse-checkout: scripts/github-agent
           persist-credentials: false
+      # The routing step's environment is printed in its log, so a credential-shaped
+      # value must stop the job before that step renders it. Only this condition reads
+      # the values (case-insensitively, across every variable); it prints a fixed message.
+      - name: Stop before rendering a credential-shaped variable
+        if: >-
+            contains(toJSON(vars), '"-----BEGIN') ||
+            contains(toJSON(vars), '"sk-') ||
+            contains(toJSON(vars), '"sk_live') ||
+            contains(toJSON(vars), '"ghp_') ||
+            contains(toJSON(vars), '"gho_') ||
+            contains(toJSON(vars), '"ghu_') ||
+            contains(toJSON(vars), '"ghs_') ||
+            contains(toJSON(vars), '"ghr_') ||
+            contains(toJSON(vars), '"github_pat_') ||
+            contains(toJSON(vars), '_token\"') ||
+            contains(toJSON(vars), 'client_secret\"') ||
+            contains(toJSON(vars), 'private_key\"')
+        run: |
+          echo '::error::A repository variable value looks like a credential. Variables are not secret and the routing step prints them: move the value to an Actions secret, delete the variable, and run again.'
+          exit 1
       - name: Route mention
         id: route
         env:
           GH_TOKEN: ${{ github.token }}
-          # The caller repository's variables, passed by name and to this step only.
-          # Never pass the whole `vars` context: Actions renders a step's env in its
-          # log and variables are not secret. This step stops on a credential-shaped
-          # value and records the rest in the request for every later step.
+          # The caller repository's variables, passed by name and to this step only,
+          # after the check above. Never pass the whole `vars` context: Actions renders
+          # a step's env in its log. This step records them in the request for every later step.
           CLAUDE_ACTION_ENABLED: ${{ vars.CLAUDE_ACTION_ENABLED }}
           CODEX_ACTION_ENABLED: ${{ vars.CODEX_ACTION_ENABLED }}
           CLAUDE_ACTION_ISSUE_COMMENT: ${{ vars.CLAUDE_ACTION_ISSUE_COMMENT }}
@@ -138,7 +157,6 @@ jobs:
           CODEX_ACTION_DISCUSSION: ${{ vars.CODEX_ACTION_DISCUSSION }}
           CODEX_ACTION_MODEL: ${{ vars.CODEX_ACTION_MODEL }}
           CODEX_ACTION_EFFORT: ${{ vars.CODEX_ACTION_EFFORT }}
-          CODEX_ACTION_SANDBOX: ${{ vars.CODEX_ACTION_SANDBOX }}
           CODEX_ACTION_TIMEOUT_MINUTES: ${{ vars.CODEX_ACTION_TIMEOUT_MINUTES }}
           CODEX_ACTION_CONTEXT_COMMENTS: ${{ vars.CODEX_ACTION_CONTEXT_COMMENTS }}
           CODEX_ACTION_CONTEXT_CHARS: ${{ vars.CODEX_ACTION_CONTEXT_CHARS }}
@@ -234,11 +252,13 @@ jobs:
           OPENAI_API_KEY: ${{ inputs.agent == 'codex' && secrets.OPENAI_API_KEY || '' }}
         run: python3 "$TOOLS/run_agent.py"
       - name: Collect changes as untrusted patch data
+        id: collect
         if: always()
         continue-on-error: true
         run: python3 "$TOOLS/collect_changes.py"
+      # A refused collection uploads nothing; the publisher then posts a trusted failure reply.
       - name: Save bounded agent output
-        if: always()
+        if: always() && steps.collect.outcome == 'success'
         id: save
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { planAppend, resolveArgs, verifyAppend, vetLabels } from './check-explain.mjs';
+import { branchCandidates, planAppend, resolveArgs, verifyAppend, vetLabels } from './check-explain.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const CLI = join(here, 'check-explain.mjs');
@@ -337,4 +337,43 @@ test('the CLI exits 0, 1 or 2 and never treats a malformed input as a pass', () 
   assert.equal(cli('args', '--input', file('bad.json', '{')).status, 2);
   assert.equal(cli('nope').status, 2);
   assert.equal(cli('verify', '--before', 'x').status, 2);
+});
+
+// F025: the branch's PR is the one whose head is the repository and branch it publishes to.
+const pull = (number, owner, name, headRefName) => ({ number, headRefName, headRepository: { name }, headRepositoryOwner: { login: owner } });
+const PULLS = [pull(1, 'example-org', 'example-repo', 'develop'), pull(2, 'example-org', 'example-repo', 'topic'),
+  pull(3, 'someone', 'example-repo', 'topic'), pull(4, 'another', 'example-repo', 'topic')];
+
+test('the current branch selects the PR from its published head, never its pull upstream or a same-name fork', () => {
+  const origin = { remote: 'origin', remoteUrl: 'https://github.com/example-org/example-repo.git', pulls: PULLS };
+  assert.deepEqual(branchCandidates({ ...origin, push: 'refs/remotes/origin/topic' }), [2]);
+  assert.deepEqual(branchCandidates({ remote: 'fork', remoteUrl: 'git@github.com:Someone/example-repo.git', pulls: PULLS,
+    push: 'refs/remotes/fork/topic' }), [3]);
+  assert.deepEqual(branchCandidates({ remote: 'fork', remoteUrl: 'ssh://git@github.com/someone/example-repo', pulls: PULLS,
+    push: 'refs/remotes/fork/topic' }), [3]);
+  for (const uncertain of [{ push: '' }, { push: 'refs/remotes/origin/' }, { push: 'refs/remotes/fork/topic' },
+    { push: 'refs/remotes/origin/topic', remoteUrl: 'https://gitlab.example.com/example-org/example-repo.git' }, { push: 'refs/remotes/origin/topic', remote: '' }]) {
+    assert.deepEqual(branchCandidates({ ...origin, ...uncertain }), [], JSON.stringify(uncertain));
+  }
+});
+
+test('the documented git commands and the helper pick the topic PR when the branch pulls from an integration branch', () => {
+  const repo = join(scratch, 'branch-repo');
+  const git = (...a) => spawnSync('git', ['-C', repo, ...a], { encoding: 'utf8' }).stdout.trim();
+  spawnSync('git', ['init', '-q', repo]);
+  git('-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'x');
+  git('remote', 'add', 'origin', 'https://github.com/example-org/example-repo.git');
+  git('update-ref', 'refs/remotes/origin/develop', 'HEAD');
+  git('checkout', '-q', '-b', 'topic');
+  git('branch', '-q', '--set-upstream-to=origin/develop');
+  const input = () => {
+    const remote = git('for-each-ref', '--format=%(push:remotename)', 'refs/heads/topic');
+    return { push: git('for-each-ref', '--format=%(push)', 'refs/heads/topic'), remote,
+      remoteUrl: remote ? git('remote', 'get-url', '--push', remote) : '', pulls: PULLS };
+  };
+  assert.deepEqual(branchCandidates(input()), [], 'a simple push to a differently named upstream has no published head');
+  git('config', 'push.default', 'current');
+  assert.deepEqual(branchCandidates(input()), [2]);
+  const run = cli('branch', '--input', file('branch.json', JSON.stringify(input())));
+  assert.deepEqual([run.status, JSON.parse(run.stdout)], [0, [2]]);
 });

@@ -232,7 +232,8 @@ class Publication(unittest.TestCase):
         Path(self.work, 'new.txt').write_text('new\n')
         with tempfile.TemporaryDirectory() as output:
             dest = Path(output, 'changes.patch')
-            with patch.dict(os.environ, {'WORK_DIR': self.work, 'PATCH_FILE': str(dest)}), \
+            with patch.dict(os.environ, {'WORK_DIR': self.work, 'PATCH_FILE': str(dest),
+                                         'RESULT_FILE': str(Path(output, 'result.md'))}), \
                  patch.object(collect_changes, 'load_context', return_value={'writable': True, 'checkout_sha': self.sha}):
                 collect_changes.main()
             data = dest.read_bytes()
@@ -250,13 +251,61 @@ class Publication(unittest.TestCase):
                 Path(self.work, path).parent.mkdir(parents=True, exist_ok=True)
                 Path(self.work, path).write_text(text)
                 dest = Path(output, 'changes.patch')
-                with patch.dict(os.environ, {'WORK_DIR': self.work, 'PATCH_FILE': str(dest)}), \
+                with patch.dict(os.environ, {'WORK_DIR': self.work, 'PATCH_FILE': str(dest),
+                                             'RESULT_FILE': str(Path(output, 'result.md'))}), \
                      patch.object(collect_changes, 'load_context', return_value={'writable': True, 'checkout_sha': self.sha}), \
                      self.assertRaises(ValueError):
                     collect_changes.main()
                 self.assertFalse(dest.exists(), 'nothing may reach the uploaded artifact')
                 self.git('reset', '-q', '--hard', self.sha)
                 self.git('clean', '-qfdx')
+
+    def collect(self, output, writable=True):
+        with patch.dict(os.environ, {'WORK_DIR': self.work, 'PATCH_FILE': str(Path(output, 'changes.patch')),
+                                     'RESULT_FILE': str(Path(output, 'result.md'))}), \
+             patch.object(collect_changes, 'load_context', return_value={'writable': writable, 'checkout_sha': self.sha}):
+            collect_changes.main()
+
+    def test_a_refused_collection_leaves_no_stale_patch_at_the_upload_path(self):
+        Path(self.work, 'notes.txt').write_text(self.FAKE_KEY)
+        with tempfile.TemporaryDirectory() as output:
+            Path(output, 'changes.patch').write_bytes(b'left by an earlier step\n')
+            with self.assertRaises(ValueError):
+                self.collect(output)
+            self.assertFalse(Path(output, 'changes.patch').exists())
+
+    def test_binary_changes_cannot_be_inspected_and_are_refused(self):
+        Path(self.work, 'blob.bin').write_bytes(b'\0\x01' + self.FAKE_KEY.encode())
+        with tempfile.TemporaryDirectory() as output:
+            with self.assertRaisesRegex(ValueError, 'Binary'):
+                self.collect(output)
+            self.assertFalse(Path(output, 'changes.patch').exists())
+        Path(self.work, 'blob.bin').unlink()
+        Path(self.work, 'hello.txt').write_bytes(b'\0binary\n')
+        self.git('add', '-A')
+        data = self.git('diff', '--cached', '--binary', self.sha)
+        self.git('reset', '-q', '--hard', self.sha)
+        with self.assertRaisesRegex(ValueError, 'Binary'):
+            publish_changes.validate_patch(self.work, data)
+
+    def test_a_credential_in_the_reply_is_refused_before_upload_and_at_publication(self):
+        for writable in (True, False):
+            with self.subTest(writable=writable), tempfile.TemporaryDirectory() as output:
+                Path(output, 'result.md').write_text('Here it is: ' + self.FAKE_GITHUB)
+                with self.assertRaisesRegex(ValueError, 'Reply'):
+                    self.collect(output, writable)
+                self.assertFalse(Path(output, 'changes.patch').exists())
+        with tempfile.TemporaryDirectory() as folder:
+            Path(folder, 'status.json').write_text('{"exit_code":0}')
+            Path(folder, 'result.md').write_text(self.FAKE_AUTH)
+            with patch.dict(os.environ, {'RESULT_FILE': str(Path(folder, 'result.md'))}), self.assertRaisesRegex(ValueError, 'Reply'):
+                validate_result.main()
+
+    def test_an_ordinary_reply_is_collected(self):
+        with tempfile.TemporaryDirectory() as output:
+            Path(output, 'result.md').write_text('Reviewed; sk-short is not a key.\n')
+            self.collect(output, writable=False)
+            self.assertEqual(Path(output, 'changes.patch').read_bytes(), b'')
 
     def test_publisher_repeats_the_content_check(self):
         data = self.changed_patch('notes.txt', self.FAKE_KEY)
@@ -331,6 +380,49 @@ class ArtifactValidation(unittest.TestCase):
             self.assertIn('produced no reply', text)
             self.assertIn('not run', text)
             self.assertIn('Run log', text)
+
+
+WORKFLOW = (Path(__file__).resolve().parents[3] / '.github/workflows/ask-agent.yml').read_text()
+
+
+def workflow_step(name):
+    start = WORKFLOW.index(f'      - name: {name}\n')
+    end = WORKFLOW.find('\n      - ', start + 1)
+    return WORKFLOW[start:end]
+
+
+class WorkflowGates(unittest.TestCase):
+    def test_a_credential_shaped_variable_stops_before_the_routing_step_renders_it(self):
+        gate = workflow_step('Stop before rendering a credential-shaped variable')
+        self.assertLess(WORKFLOW.index(gate), WORKFLOW.index('      - name: Route mention\n'))
+        self.assertNotIn('env:', gate)
+        self.assertNotIn('${{', gate)
+        self.assertIn('exit 1', gate)
+        from agent_lib import _CREDENTIAL_JSON_KEYS, _CREDENTIAL_PREFIXES
+        for prefix in _CREDENTIAL_PREFIXES:
+            self.assertIn(f"contains(toJSON(vars), '\"{prefix}')", gate)
+        for key in _CREDENTIAL_JSON_KEYS:
+            self.assertIn(f"{key.split('_')[-1]}\\\"')", gate)
+
+    def test_only_a_successful_collection_is_uploaded(self):
+        self.assertIn("if: always() && steps.collect.outcome == 'success'", workflow_step('Save bounded agent output'))
+        self.assertIn('id: collect', workflow_step('Collect changes as untrusted patch data'))
+
+    def test_the_credentialed_step_gets_only_its_own_secret_and_no_command_tools(self):
+        claude, _, _ = run_agent.claude_command(AgentConfig('claude', {}), writable=True)
+        self.assertEqual(claude[claude.index('--tools') + 1], 'Read,Glob,Grep,Edit,Write')
+        self.assertEqual(claude[claude.index('--permission-mode') + 1], 'acceptEdits')
+        self.assertEqual(claude[claude.index('--disallowedTools') + 1], 'Read(//proc/**)')
+        self.assertNotIn('--dangerously-skip-permissions', claude)
+        narrowed, _, _ = run_agent.claude_command(AgentConfig('claude', {'CLAUDE_ACTION_ALLOWED_TOOLS': 'Bash,Edit,Read'}), True)
+        self.assertEqual(narrowed[narrowed.index('--tools') + 1], 'Read,Edit')
+        read_only, _, _ = run_agent.claude_command(AgentConfig('claude', {}))
+        self.assertEqual(read_only[read_only.index('--tools') + 1], 'Read,Glob,Grep')
+        self.assertEqual(read_only[read_only.index('--permission-mode') + 1], 'dontAsk')
+        with patch.dict(os.environ, {'OPENAI_API_KEY': 'test-placeholder'}, clear=True), redirect_stdout(io.StringIO()):
+            codex, _, _ = run_agent.codex_command(AgentConfig('codex', {'CODEX_ACTION_SANDBOX': 'danger-full-access'}), '/tmp/r.md')
+        self.assertEqual(codex[codex.index('--sandbox') + 1], 'read-only')
+        self.assertFalse(any('danger' in arg or 'network_access' in arg for arg in codex))
 
 
 class LaunchBoundary(unittest.TestCase):

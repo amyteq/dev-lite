@@ -294,8 +294,8 @@ class TestModelSelection(unittest.TestCase):
         claude, codex = self.commands({"CLAUDE_ACTION_MODEL": "claude-choice", "CODEX_ACTION_MODEL": "codex-choice"})
         self.assertEqual(claude[claude.index("--model") + 1], "claude-choice")
         self.assertEqual(codex[codex.index("--model") + 1], "codex-choice")
-        self.assertIn("--dangerously-skip-permissions", claude)
-        self.assertIn("workspace-write", codex)
+        self.assertNotIn("--dangerously-skip-permissions", claude)
+        self.assertEqual(codex[codex.index("--sandbox") + 1], "read-only")
 
     def test_claude_reports_json_and_receives_an_explicit_effort(self):
         claude, codex = self.commands({"CLAUDE_ACTION_EFFORT": "high", "CODEX_ACTION_EFFORT": "low"})

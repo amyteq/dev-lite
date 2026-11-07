@@ -26,13 +26,15 @@ test -z "$(git status --porcelain)" &&
 node "${CLAUDE_SKILL_DIR}/planning-index.mjs" build --out $S/materialize-index.json
 ```
 
-If its digest differs from `baseline.planning_index.digest`, the planning docs moved since the analysis: stop and re-run the analysis. The digest covers every feat and story doc's full text, so a body-only change to a feat's scope or a story's acceptance criteria stops too. The index sees committed docs only, so also list every open PR's feat or story doc paths. Both listings paginate to the end, because `gh pr list` stops at 30 PRs and a PR's file list at 100 paths by default; any failure stops:
+If its digest differs from `baseline.planning_index.digest`, the planning docs moved since the analysis: stop and re-run the analysis. The digest covers every feat and story doc's full text, so a body-only change to a feat's scope or a story's acceptance criteria stops too. The index sees committed docs only, so also list every open PR's feat or story doc paths. Both listings paginate to the end, because `gh pr list` stops at 30 PRs and a PR's file list at 100 paths by default. The files endpoint never returns more than 3,000 paths, so each PR's complete listing must count exactly its `changed_files`; a shorter one, or any failure, stops:
 
 ```bash
 gh api --paginate 'repos/OWNER/REPO/pulls?state=open&per_page=100' --jq '.[].number' > $S/open-prs.txt &&
 while read -r N; do
-  gh api --paginate "repos/OWNER/REPO/pulls/$N/files?per_page=100" \
-    --jq ".[] | select(.filename | test(\"^docs/(feats|stories)/(FT|STY)_\")) | \"$N \(.filename)\"" || exit 1
+  gh api "repos/OWNER/REPO/pulls/$N" --jq .changed_files > $S/pr-files.count &&
+  gh api --paginate "repos/OWNER/REPO/pulls/$N/files?per_page=100" --jq '.[].filename' > $S/pr-files.txt &&
+  test "$(wc -l < $S/pr-files.txt)" -eq "$(cat $S/pr-files.count)" || { echo "PR #$N: incomplete file list" >&2; exit 1; }
+  grep -E '^docs/(feats|stories)/(FT|STY)_' $S/pr-files.txt | sed "s|^|$N |"
 done < $S/open-prs.txt > $S/open-pr-docs.txt
 ```
 
@@ -43,7 +45,7 @@ node "${CLAUDE_SKILL_DIR}/planning-index.mjs" next $S/materialize-index.json fea
 node "${CLAUDE_SKILL_DIR}/planning-index.mjs" next $S/materialize-index.json story S
 ```
 
-`F` is the number of approved new feats and `S` the number of new stories. `next` starts past every number the index holds, retired and superseded ones included, and never below 101; it never fills a gap. Check each prefix separately against `$S/open-pr-docs.txt`: if an open PR adds an `FT_` doc numbered at or above the first `FT_` number `next` printed, start the feats past the highest `FT_` number any open PR adds, and likewise for `STY_` and the stories. Allocate in packet order: new feats in the order the packet names them, new stories in unit order.
+`F` is the number of approved new feats and `S` the number of new stories; a zero allocates nothing and prints nothing. `next` starts past every number the index holds, retired and superseded ones included, and never below 101; it never fills a gap. Check each prefix separately against `$S/open-pr-docs.txt`: if an open PR adds an `FT_` doc numbered at or above the first `FT_` number `next` printed, start the feats past the highest `FT_` number any open PR adds, and likewise for `STY_` and the stories. Allocate in packet order: new feats in the order the packet names them, new stories in unit order.
 
 ## 4. Write the docs
 
@@ -63,7 +65,7 @@ Docs carry no readiness, progress, dependency map or open decision: those belong
 
 Commit, then rebuild the index from the branch; it must exit `0` and count exactly the new docs:
 
-Stage only the exact paths this packet owns — each new or changed doc, `docs/feats/README.md`, `docs/stories/README.md` and `.github/labels.yml` — listed one per line in `$S/owned.txt`, and require the staged set to equal that list before committing:
+Stage only the exact paths this packet changes, listed one per line in `$S/owned.txt`: each new or changed doc, plus `docs/feats/README.md`, `docs/stories/README.md` or `.github/labels.yml` only when this packet adds or changes a row or label there. A body-only amendment lists its story doc alone. Require the staged set to equal that list before committing:
 
 ```bash
 xargs -d '\n' git add -- < $S/owned.txt &&

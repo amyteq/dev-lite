@@ -7,7 +7,7 @@
 //
 // `node planning-index.mjs build --out <index.json>`, run from the repository root; reads HEAD.
 // `node planning-index.mjs verify-homes <proposal.json> <index.json> [--json]`
-// `node planning-index.mjs next <index.json> feat|story [count]`
+// `node planning-index.mjs next <index.json> feat|story [count]`   (count 0 to 999; 0 prints nothing)
 // Exit 0 = built / no findings, 1 = build stopped / findings, 2 = CLI usage or unreadable input.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -243,7 +243,7 @@ const USAGE = 'usage: planning-index.mjs build --out <index.json> | verify-homes
 
 function next(rest) {
   const [file, level, count = '1'] = rest;
-  if (rest.length < 2 || rest.length > 3 || !Object.hasOwn(LEVELS, level) || !/^[1-9]\d{0,2}$/.test(count)) {
+  if (rest.length < 2 || rest.length > 3 || !Object.hasOwn(LEVELS, level) || !/^(?:0|[1-9]\d{0,2})$/.test(count)) {
     console.error(USAGE);
     return 2;
   }
@@ -258,7 +258,8 @@ function next(rest) {
     console.error(`${file} is not a ${SCHEMA_TAG} document`);
     return 2;
   }
-  console.log(nextKeys(index, level, Number(count)).join('\n'));
+  // An empty category allocates nothing, so a story-only amendment passes 0 feats.
+  if (count !== '0') console.log(nextKeys(index, level, Number(count)).join('\n'));
   return 0;
 }
 

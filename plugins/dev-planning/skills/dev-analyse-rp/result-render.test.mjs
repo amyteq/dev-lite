@@ -149,7 +149,7 @@ check('AC4.5 an absolute or home path in the packet stops the render, under any 
 
 check('AC4.5 the guard passes the skill name, links, globs, placeholders, repository-relative paths and the cited root', () => {
   // Every rendered body also carries the renderer's own `<details>`, `<summary>` and `<code>` tags.
-  const kept = 'Checked /dev-analyse-rp against docs/notes/a.md, src/**/*.ts and <api_domain>/v1/x, https://github.com/x/y/pull/1, part=1/3, and/or a / b.';
+  const kept = 'Checked /dev-analyse-rp against docs/notes/a.md, src/**/*.ts and <api_domain>/v1/x, https://github.com/example-org/example-repo/pull/1, part=1/3, and/or a / b.';
   const body = rendered({ proposal: { ...BASE, verdict: { ...BASE.verdict, evidence_limits: kept } } }).parts[0];
   assert.ok(body.includes(kept) && body.includes(`\`temp/dev-analyse-rp/${RUN}/\``));
   assert.strictEqual(JSON.parse(cli(packet({ context: { root: `$DEV_ANALYSE_RP_ROOT/${RUN}/` } })).stdout).action, 'proceed');

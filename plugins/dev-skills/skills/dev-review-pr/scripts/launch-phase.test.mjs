@@ -36,7 +36,7 @@ if (argv[0] === '--version') { if (env.STUB_VERSION_FAIL) process.exit(1); conso
 if (argv[0] === 'login') { console.log(env.STUB_LOGIN ?? 'Logged in using ChatGPT'); process.exit(0); }
 readFileSync(0);
 if (env.STUB_LEAK) { console.log(env.AZURE_OPENAI_API_KEY); console.error('leak ' + env.AZURE_OPENAI_API_KEY); }
-if (env.STUB_DIRTY) writeFileSync(after('-C') + '/change.txt', 'writer change');
+if (env.STUB_DIRTY) writeFileSync((after('-C') ?? '.') + '/change.txt', 'writer change');
 if (env.STUB_COMMIT) {
   writeFileSync('commit.txt', 'writer commit');
   execFileSync('git', ['add', 'commit.txt']);
@@ -120,6 +120,7 @@ const hasPair = (argv, flag, value) => argv.some((arg, index) => arg === flag &&
 test('each supported CLI role uses configured defaults without rewriting configuration', () => {
   for (const provider of ['codex', 'claude']) {
     for (const role of ['reviewer', 'writer']) {
+      if (provider === 'codex' && role === 'writer') continue; // refused; see the Codex writer test
       const f = fixture();
       const config = join(f.home, '.codex', 'config.toml');
       const before = readFileSync(config, 'utf8');
@@ -129,10 +130,10 @@ test('each supported CLI role uses configured defaults without rewriting configu
       assert.deepEqual(run.record.requested, { model: null, effort: null, profile: null });
       const { argv } = run.exec;
       if (provider === 'codex') {
-        assert.ok(hasPair(argv, '-s', role === 'reviewer' ? 'read-only' : 'workspace-write'));
+        assert.ok(hasPair(argv, '-s', 'read-only'));
         assert.ok(!argv.includes('--ignore-user-config') && !argv.includes('-m'));
       } else {
-        assert.ok(hasPair(argv, '--tools', role === 'reviewer' ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash'));
+        assert.ok(hasPair(argv, '--tools', role === 'reviewer' ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write'));
         assert.ok(argv.includes('--strict-mcp-config') && !argv.includes('--model'));
         assert.ok(hasPair(argv, '--permission-mode', 'acceptEdits'));
         assert.ok(hasPair(argv, '--setting-sources', 'user'), 'PR-controlled project settings must not load');
@@ -278,7 +279,7 @@ test('a probe that outlives its timeout is recorded as a timeout instead of laun
   for (const [expected, options] of [
     [/codex --version timed out after \d+s/, { env: { STUB_HANG: '--version' } }],
     [/git rev-parse timed out after \d+s/, { gitHang: 'rev-parse' }],
-    [/git remote timed out after \d+s/, { gitHang: 'remote', role: 'writer', flags: { push: 'origin' } }],
+    [/git remote timed out after \d+s/, { gitHang: 'remote', provider: 'claude', role: 'writer', flags: { push: 'origin' } }],
   ]) {
     const f = fixture({ gitHang: options.gitHang });
     f.gitIn('remote', 'add', 'origin', join(f.root, 'remote.git'));
@@ -323,20 +324,20 @@ test('a writer edit, commit and push permission is checked before the launch, no
   f.gitIn('remote', 'add', 'origin', join(f.root, 'remote.git'));
   // The remote is a path that does not exist, so the record reports the granted authority and leaves the transport open
   // rather than predicting a push the child could not complete.
-  assert.deepEqual(launch(f, { role: 'writer', flags: { push: 'origin' } }).record.permissions,
+  assert.deepEqual(launch(f, { provider: 'claude', role: 'writer', flags: { push: 'origin' } }).record.permissions,
     { edit: 'writable', commit: 'coordinator-required', push: 'granted-transport-unverified' });
-  assert.equal(launch(f, { role: 'writer' }).record.permissions.push, 'not-granted');
-  assert.equal(launch(f, { role: 'writer', flags: { push: 'absent' } }).record.permissions.push, 'no-such-remote');
+  assert.equal(launch(f, { provider: 'claude', role: 'writer' }).record.permissions.push, 'not-granted');
+  assert.equal(launch(f, { provider: 'claude', role: 'writer', flags: { push: 'absent' } }).record.permissions.push, 'no-such-remote');
   assert.equal(launch(f, { flags: { push: 'origin' } }).code, 2, 'a reviewer is never given push authority');
   const noCommit = fixture();
   chmodSync(join(noCommit.root, 'repo/.git'), 0o555);
   const run = launch(noCommit, { provider: 'claude', role: 'writer' });
   chmodSync(join(noCommit.root, 'repo/.git'), 0o755);
-  assert.deepEqual(run.record.permissions, { edit: 'writable', commit: 'not-writable', push: 'not-granted' });
+  assert.deepEqual(run.record.permissions, { edit: 'writable', commit: 'coordinator-required', push: 'not-granted' });
   assert.ok(run.exec, 'a writer that cannot commit still runs, because the coordinator commits for it');
   const noEdit = fixture();
   chmodSync(noEdit.repo, 0o555);
-  const refused = launch(noEdit, { role: 'writer' });
+  const refused = launch(noEdit, { provider: 'claude', role: 'writer' });
   chmodSync(noEdit.repo, 0o755);
   assert.equal(refused.record.status, 'refused');
   assert.deepEqual(refused.record.blockers, ['writer-permission: the worktree is not writable, so the phase could produce no change']);
@@ -351,9 +352,9 @@ test('a denied push is reported as that operation, and writer commits are listed
   assert.match(committed.record.commits[0].committer, /^Writer <w@x>$/);
 });
 
-test('a Codex writer that leaves uncommitted changes completes, and the coordinator commit is attributed to the coordinator', () => {
+test('a writer that leaves uncommitted changes completes, and the coordinator commit is attributed to the coordinator', () => {
   const f = fixture();
-  const run = launch(f, { role: 'writer', env: { STUB_DIRTY: '1' } });
+  const run = launch(f, { provider: 'claude', role: 'writer', env: { STUB_DIRTY: '1' } });
   assert.equal(run.code, 0, run.recordText);
   assert.deepEqual([run.record.status, run.record.commits, run.record.dirty_after, run.record.denied], ['completed', [], true, []]);
   f.gitIn('add', 'change.txt');
@@ -371,15 +372,19 @@ test('a Codex writer that leaves uncommitted changes completes, and the coordina
   assert.match(refused.stderr, /is not a commit descending from/);
 });
 
-test('a Codex writer records commit as coordinator-required in a linked worktree too, and a Claude writer keeps the filesystem result', () => {
+test('no writer gets a shell, and a Codex writer is refused before launch', () => {
   const f = fixture();
   const linked = join(f.root, 'linked');
   f.gitIn('worktree', 'add', '-q', linked, f.head);
   for (const worktree of [f.repo, linked]) {
-    const run = launch(f, { role: 'writer', flags: { worktree } });
-    assert.deepEqual([run.record.permissions.commit, Boolean(run.exec)], ['coordinator-required', true], `${worktree}: ${run.recordText}`);
+    const claude = launch(f, { provider: 'claude', role: 'writer', flags: { worktree } });
+    assert.deepEqual([claude.record.permissions.commit, Boolean(claude.exec)], ['coordinator-required', true], `${worktree}: ${claude.recordText}`);
+    assert.ok(!claude.exec.argv.join(',').includes('Bash'), 'a writer shell would run PR code under the operator login');
   }
-  assert.equal(launch(f, { provider: 'claude', role: 'writer', flags: { worktree: linked } }).record.permissions.commit, 'writable');
+  const codex = launch(fixture(), { provider: 'codex', role: 'writer' });
+  assert.equal(codex.record.status, 'refused');
+  assert.match(codex.record.blockers[0], /^codex-writer:/);
+  assert.equal(codex.exec, undefined);
 });
 
 test('a role child receives no coordinator session variable, and a Claude child keeps only its login and provider variables', () => {
@@ -388,6 +393,7 @@ test('a role child receives no coordinator session variable, and a Claude child 
   const sentinels = Object.fromEntries(names.map((name) => [name, `sentinel:${name}`]));
   for (const provider of ['codex', 'claude']) {
     for (const role of ['reviewer', 'writer']) {
+      if (provider === 'codex' && role === 'writer') continue;
       const run = launch(fixture(), { provider, role, env: sentinels });
       assert.equal(run.code, 0, run.recordText);
       assert.ok(run.log.length >= 2, 'the version probe and the phase');

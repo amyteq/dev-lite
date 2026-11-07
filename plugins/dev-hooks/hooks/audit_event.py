@@ -8,7 +8,8 @@ Wired by the dev-hooks plugin as:
 Appends to a daily log under `$CLAUDE_PROJECT_DIR/.claude/audit/`. The directory
 gets its own `.gitignore` (`*`) on first use, so consumers need no ignore rule.
 It NEVER blocks (always exits 0) and NEVER records file contents, command
-arguments or secret values: a Bash call is logged by its executable name only.
+arguments or secret values: a Bash call is logged by its literal executable name
+only, or without one when the program is not a plain word.
 
 Contract (Claude Code hooks):
   - stdin: JSON describing the event.
@@ -19,11 +20,30 @@ import datetime
 import json
 import os
 import re
+import shlex
 import sys
 
 MAX_CMD = 240  # truncate config change descriptions in the log
-# The first word after any leading `NAME=value` assignments.
-EXECUTABLE_RE = re.compile(r"\s*(?:\w+=\S*\s+)*([^\s;&|<>()]+)")
+ASSIGNMENT_RE = re.compile(r"[A-Za-z_]\w*=")
+LITERAL_PROGRAM_RE = re.compile(r"[\w./+-]+")
+
+
+def executable(command: str) -> str | None:
+    """The literal program of the first simple command, or None when it is not a plain word.
+
+    Words are split as the shell would, so a quoted or standalone assignment is never
+    mistaken for the program and its value never reaches the log.
+    """
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()<>")
+    lexer.whitespace_split = True
+    try:
+        for word in lexer:
+            if not ASSIGNMENT_RE.match(word):
+                program = os.path.basename(word)
+                return program[:64] if LITERAL_PROGRAM_RE.fullmatch(program) else None
+    except ValueError:
+        return None
+    return None
 
 # Redact anything that looks like a key/token/secret value in a logged string.
 SECRET_VALUE_RE = re.compile(
@@ -61,8 +81,9 @@ def summarize(data: dict) -> dict:
     if isinstance(ti, dict):
         if "command" in ti:
             # Only the program name: arguments, headers and heredoc bodies can carry secrets.
-            program = EXECUTABLE_RE.match(str(ti["command"]))
-            out["executable"] = os.path.basename(program.group(1))[:64] if program else ""
+            program = executable(str(ti["command"]))
+            if program:
+                out["executable"] = program
         for key in ("file_path", "notebook_path", "path"):
             if key in ti:
                 out["path"] = str(ti[key])  # path only, never content

@@ -48,7 +48,7 @@ Replies, failure notes and draft PRs are English; ask for another reply language
 
 ## Variables
 
-Prefix `CLAUDE_ACTION_` or `CODEX_ACTION_`. Only these names are read; the whole `vars` context is never passed. Only the routing step receives them: it stops the run on a value that looks like a credential and records the rest in the request artifact, which every later step reads instead. GitHub still renders that one step's environment in its log, so a credential pasted into a variable appears there once; variables are not secret, so move it to an Actions secret and delete the variable.
+Prefix `CLAUDE_ACTION_` or `CODEX_ACTION_`. Only these names are read; the whole `vars` context is never passed. Only the routing step receives them, and it records them in the request artifact, which every later step reads instead. GitHub renders that step's environment in its log, so a step before it stops the job when any repository variable looks like a credential; only its condition reads the values, and it prints a fixed message. Variables are not secret: move such a value to an Actions secret and delete the variable. A run with step debug logging enabled also prints evaluated conditions, so keep debug logging off.
 
 | Suffix | Default | Meaning |
 | --- | --- | --- |
@@ -59,24 +59,25 @@ Prefix `CLAUDE_ACTION_` or `CODEX_ACTION_`. Only these names are read; the whole
 | `CONTEXT_COMMENTS` | `20` | Newest thread comments in the prompt, clamped to 1–100 |
 | `CONTEXT_CHARS` | `4000` | Characters per context section, clamped to 100–20000 |
 | `MAX_TURNS` | `100` | Claude only, clamped to 1–100 |
-| `ALLOWED_TOOLS` | empty | Claude only: narrows the tools of writable runs |
-| `SANDBOX` | `workspace-write` | Codex only: `read-only`, `workspace-write` or `danger-full-access` for writable runs |
+| `ALLOWED_TOOLS` | empty | Claude only: narrows `Read`, `Glob`, `Grep`, `Edit` and `Write`; it never adds a tool |
 
 ## Commands and routing
 
-Read commands are `review`, `audit`, `plan`, `explain`, `triage`, `summarize`, `answer` and `ask`; write commands are `fix`, `implement`, `test`, `refactor`, `docs`, `design`, `chore` and `revert`, given as the first word after the mention. A request is writable only when every mention in the raw text, code included, names the same write command. Missing, unknown or mixed commands, fork PRs and PRs whose head is protected are read-only. Mentions inside backticks, code fences (including an unclosed fence, which runs to the end of the text) or lines indented four or more columns do not trigger a run. An inline review comment's file, line and bounded diff hunk reach the prompt as quoted thread data. Editing a comment never re-runs; editing an issue or discussion runs only when the edit adds a mention that was not there before. Manual **Run workflow** takes `surface`, `number` and `request`.
+Read commands are `review`, `audit`, `plan`, `explain`, `triage`, `summarize`, `answer` and `ask`; write commands are `fix`, `implement`, `test`, `refactor`, `docs`, `design`, `chore` and `revert`, given as the first word after the mention. A request is writable only when every mention in the raw text, code included, names the same write command. Missing, unknown or mixed commands, fork PRs, PRs whose head is protected and every Codex request are read-only. Mentions inside backticks, code fences (including an unclosed fence, which runs to the end of the text) or lines indented four or more columns, also inside a `>` quote, do not trigger a run. An inline review comment's file, line and bounded diff hunk reach the prompt as quoted thread data. Editing a comment never re-runs; editing an issue or discussion runs only when the edit adds a mention that was not there before. Manual **Run workflow** takes `surface`, `number` and `request`.
 
 ## Trust boundary
 
 | Job | Token and role |
 | --- | --- |
 | prepare | Read-only token. Routes, authorizes, captures the target SHA, builds the prompt and uploads it as an immutable artifact. No model credentials. |
-| execute | `contents: read`, no persisted checkout credentials, and a CLI environment stripped of GitHub tokens. Only the run step gets the selected agent's credential. Produces an untrusted reply, status and patch; a patch that touches a protected path or adds a credential-shaped value is refused before upload. |
+| execute | `contents: read`, no persisted checkout credentials, and a CLI environment stripped of GitHub tokens. Only the run step gets the selected agent's credential, and that session runs no checkout command (below). Produces an untrusted reply, status and patch; a reply or patch with a credential-shaped value, a binary change or a protected path is refused, and only a successful collection is uploaded. |
 | publish | Fresh runner with trusted scripts. Rechecks authorization, validates bounded results and the patch, pushes a new `agent/<agent>/<run>-<attempt>` branch and opens a **draft PR** against the PR's head branch or the base branch, then posts the reply. Never pushes to existing branches, force-pushes, approves or merges. |
 
-The publisher rejects patches over 2 MB or 100 files, path traversal, Git metadata, `.github/`, local credential and state files, added credential-shaped values (private keys, GitHub tokens, provider keys, OAuth token fields), symlinks and submodules. A push made with the Actions token does not trigger the usual `pull_request` CI; run it manually on the draft. This narrows the publication surface; it does not replace review.
+The publisher rejects patches over 2 MB or 100 files, path traversal, Git metadata, `.github/`, local credential and state files, binary changes, added credential-shaped values (private keys, GitHub tokens, provider keys, OAuth token fields), symlinks and submodules, and a reply carrying such a value. A push made with the Actions token does not trigger the usual `pull_request` CI; run it manually on the draft. This narrows the publication surface; it does not replace review.
 
-The agent credential is not isolated from repository code. A writable run executes the checkout's own commands (installs, tests) as children of the CLI, under the same user, so that code can read the selected agent's credential. Writable runs use only the base branch or a same-repository PR branch, which only collaborators with write access can push to, and those collaborators can already read repository secrets through a workflow of their own; fork PRs are read-only. Give the agent credential only to repositories whose write collaborators may hold it, and prefer a dedicated, revocable credential.
+The session that holds the agent credential never executes checkout code. Anything the CLI spawns runs as the same user and could read the credential from the CLI's environment, its process entry or Codex's `auth.json`, and permission to change a test is not permission to read the operator's login. So Claude gets `Read`, `Glob` and `Grep`, plus `Edit` and `Write` on writable requests, with no shell, web or subagent tool and no reads under `/proc`. Codex cannot work without running commands, so it is never writable: it answers in its read-only, network-less sandbox. Installs and tests are the separated step: they run on the draft PR, under the repository's own CI, after a maintainer starts it.
+
+Residual: Codex's read-only commands can still read its credential, and only the credential-shape check stands between them and the reply. Use a dedicated, revocable Codex credential, or turn Codex off with `CODEX_ACTION_ENABLED=false`.
 
 ## How the workflow finds its own scripts
 

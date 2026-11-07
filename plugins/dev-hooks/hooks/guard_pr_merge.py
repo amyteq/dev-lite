@@ -18,7 +18,10 @@ Contract (Claude Code hooks):
 Override: set ALLOW_FOREIGN_MERGE=1 to bypass.
   The guard is ON by default: unset / empty / "0" / "false" keep it active.
   Any other value bypasses.
-FAIL OPEN: any parsing/lookup error exits 0 so the session is never bricked.
+A command with two merges, unreadable quoting around a merge, or a numbered or
+branch merge after a directory or repository change is blocked: name the PR by
+URL or `--repo`, one merge per command.
+FAIL OPEN otherwise: a lookup or internal error exits 0 so the session is never bricked.
 """
 
 import json
@@ -28,16 +31,20 @@ import shlex
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from guard_tool import invocations, simple_commands  # noqa: E402
+
 RED = "\033[31m"
 BOLD = "\033[1m"
 RESET = "\033[0m"
 
-# `gh` accepts the repository flag before the subcommand too: `gh -R o/r pr merge 5`.
-MERGE_RE = re.compile(r"\bgh(?:\s+(?:-R|--repo)(?:=|\s+)\S+)*\s+pr\s+merge\b", re.IGNORECASE)
+# Cheap pre-filter; the shell words decide.
+MAYBE_MERGE = re.compile(r"\bgh\b.*\bmerge\b", re.IGNORECASE | re.DOTALL)
 # `gh pr merge` flags that take a value, so the value is never read as the selector.
 VALUE_FLAGS = {"-A", "--author-email", "-b", "--body", "-F", "--body-file", "-t", "--subject",
                "--match-head-commit", "-R", "--repo"}
-CHANGES_DIRECTORY = re.compile(r"(?:^|[;&|(\s])(?:cd|pushd)\s|\s-C\s")
+# Anything that can make gh resolve a repository other than the hook's own directory.
+CONTEXT_CHANGE = re.compile(r"(?:^|[;&|(\s'\"`])(?:cd|pushd|popd|export|source|\.)\s|\bGH_(?:REPO|HOST|CONFIG_DIR)=")
 
 
 def gh(args):
@@ -51,22 +58,17 @@ def gh(args):
         return ""
 
 
-def merge_target(cmd):
-    """The (selector, repo) of the first `gh pr merge`, read as gh reads them.
+def merge_target(args):
+    """The (selector, repo) of one `gh` call if it is `pr merge`, read as gh reads them; else None.
 
-    The selector is the first positional argument — a number, URL or branch — or
-    None for the current branch's PR. The repository comes from `-R`/`--repo` on
-    either side of `pr merge`, else from a `GH_REPO=` assignment prefixing `gh`.
+    The selector is the first positional argument after `pr merge` — a number, URL
+    or branch — or None for the current branch's PR. The repository comes from
+    `-R`/`--repo` on either side of `pr merge`.
     """
-    match = MERGE_RE.search(cmd)
-    lexer = shlex.shlex(cmd[match.start() + 2:], posix=True, punctuation_chars=True)
-    lexer.whitespace_split = True
-    words = iter(lexer)
+    words = iter(args)
     selector = repo = None
-    subcommand = 0  # positional words still to skip: `pr`, then `merge`
+    subcommand = []
     for word in words:
-        if set(word) <= set(";&|()<>"):
-            break  # end of this command
         if word.startswith("-"):
             name, equals, value = word.partition("=")
             if name.startswith("-R") and len(name) > 2:
@@ -75,12 +77,31 @@ def merge_target(cmd):
                 value = next(words, "")
             if name in ("-R", "--repo"):
                 repo = value
-        elif subcommand < 2:
-            subcommand += 1
+        elif len(subcommand) < 2:
+            subcommand.append(word)
         elif selector is None:
             selector = word
-    env = re.search(r"\bGH_REPO=(\S+)\s+(?:\w+=\S*\s+)*$", cmd[:match.start()])
-    return selector, repo or (env.group(1).strip("'\"") if env else None)
+    return (selector, repo) if subcommand == ["pr", "merge"] else None
+
+
+def merges(cmd):
+    """(selector, repo) of every `gh pr merge` in the command, also behind wrappers, `sh -c` and `eval`.
+
+    A `GH_REPO=` assignment in the same simple command names the repository when no flag does.
+    """
+    found = []
+    for words in simple_commands(cmd):
+        env_repo = next((word.split("=", 1)[1] for word in words if word.startswith("GH_REPO=")), None)
+        for args in invocations(shlex.join(words), {"gh"}):
+            target = merge_target(args)
+            if target:
+                found.append((target[0], target[1] or env_repo))
+    return found
+
+
+def block(message):
+    sys.stderr.write(f"{RED}{BOLD}⛔ {message}{RESET}\n")
+    sys.exit(2)
 
 
 def main():
@@ -92,23 +113,34 @@ def main():
         sys.exit(0)
     ti = data.get("tool_input") or data.get("toolInput") or {}
     cmd = ti.get("command", "") if isinstance(ti, dict) else ""
-    if not cmd or not MERGE_RE.search(cmd):
-        sys.exit(0)  # not a `gh pr merge` — fast path, no gh calls
+    if not cmd or not re.search(r"\bgh\b", cmd):
+        sys.exit(0)  # no `gh` call — fast path
 
     # ON by default: unset/empty/"0"/"false" ≡ guard active; only a real truthy
     # value bypasses.
     if os.environ.get("ALLOW_FOREIGN_MERGE", "") not in ("", "0", "false"):
         sys.exit(0)  # explicit override
 
+    try:
+        found = merges(cmd)
+    except ValueError:
+        if MAYBE_MERGE.search(cmd):
+            block("This command's quoting cannot be read; run `gh pr merge` as its own simple command.")
+        sys.exit(0)
+    if not found:
+        sys.exit(0)
+    if len(found) > 1:
+        block("Merge one PR per command, so each one's author is checked.")
+    [(selector, repo)] = found
+    qualified = repo or re.match(r"https://github\.com/[^/\s]+/[^/\s]+/pull/\d+", selector or "")
+    if not qualified and CONTEXT_CHANGE.search(cmd):
+        # The hook resolves numbers and branches in its own directory, not the one the command moves to.
+        block("Name the PR by URL, or add --repo OWNER/REPO, when the command changes directory or gh's repository.")
+
     me = gh(["api", "user", "--jq", ".login"])
     if not me:
         sys.exit(0)  # can't identify current user -> fail open
 
-    selector, repo = merge_target(cmd)
-    if selector is None and CHANGES_DIRECTORY.search(cmd[:MERGE_RE.search(cmd).start()]):
-        # The hook resolves "the current branch" in its own directory, not the one the command moved to.
-        sys.stderr.write(f"{RED}{BOLD}⛔ Name the PR to merge (number or URL) when the command changes directory first.{RESET}\n")
-        sys.exit(2)
     view = ["pr", "view", *([selector] if selector else []), *(["--repo", repo] if repo else []),
             "--json", "author,number,title"]
 

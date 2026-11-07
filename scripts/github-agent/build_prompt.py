@@ -26,6 +26,7 @@ from agent_lib import (  # noqa: E402
     log,
     truncate,
     warn,
+    WRITE_COMMANDS,
 )
 
 # Per-command steering. An unknown or absent command falls through to the
@@ -197,7 +198,8 @@ def working_tree_notes(context: dict) -> str:
         )
     if context.get("writable"):
         lines.append(
-            "Edit files locally and run relevant checks. Leave changes uncommitted. A separate trusted "
+            "Edit files locally and leave them uncommitted. You cannot run commands: this session holds the "
+            "agent credential, so checks run on the draft pull request instead; say which ones matter. A separate trusted "
             f"publisher will open a draft pull request against `{draft_pr_base(context)}` on a generated "
             "agent branch. Do not modify .github/, .gitmodules, credentials, or private package files. "
             "Never run git commit/push or create a pull request yourself."
@@ -211,6 +213,11 @@ def working_tree_notes(context: dict) -> str:
         lines.append(
             f"The head branch `{pull['head_ref']}` is protected, so this request is read-only. Describe "
             "any needed change in your reply; local changes will never be published."
+        )
+    elif context.get("agent") == "codex" and context.get("command") in WRITE_COMMANDS:
+        lines.append(
+            "Codex answers here but never edits, because it cannot work without running commands next to its "
+            "credential. Describe the change in your reply; local changes will never be published."
         )
     else:
         lines.append(

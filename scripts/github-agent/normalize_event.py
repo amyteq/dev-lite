@@ -290,7 +290,8 @@ def resolve_checkout(
     """
     command = context["command"]
     agreed = mention_commands(context["search_text"], context["mention"]) == {command}
-    read_only = command not in WRITE_COMMANDS or not agreed
+    # Codex executes commands in every mode, so it never holds its credential next to an edit of the checkout.
+    read_only = command not in WRITE_COMMANDS or not agreed or context.get("agent") != "claude"
 
     if context["surface"] != "pull_request" or not context.get("number"):
         context["ref"] = base_branch

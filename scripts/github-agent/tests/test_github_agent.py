@@ -18,6 +18,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
+import agent_lib  # noqa: E402
 import normalize_event  # noqa: E402
 from agent_lib import (  # noqa: E402
     AgentConfig,
@@ -157,7 +158,7 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(config("claude").get("MODEL"), "")
         self.assertEqual(config("codex").get("MODEL"), "")
         self.assertEqual(config("claude").get("MAX_TURNS"), "100")
-        self.assertEqual(config("codex").get("SANDBOX"), "workspace-write")
+        self.assertNotIn("SANDBOX", agent_lib.AGENT_DEFAULTS["codex"])
 
     def test_an_unset_master_switch_follows_repository_visibility(self):
         self.assertTrue(config("claude").enabled(private=True))
@@ -515,8 +516,10 @@ class TestCheckoutResolution(unittest.TestCase):
         normalize_event.gh_rest = fake_gh_rest
         self.addCleanup(setattr, normalize_event, "gh_rest", original)
 
-    def resolve(self, surface, command, number=639, payload_pr=None, text=None, base="main", protected=("main",)):
+    def resolve(self, surface, command, number=639, payload_pr=None, text=None, base="main", protected=("main",),
+                agent="claude"):
         context = {
+            "agent": agent,
             "surface": surface,
             "command": command,
             "number": number,
@@ -584,6 +587,8 @@ class TestCheckoutResolution(unittest.TestCase):
     # it misses must not turn a request into a writable run.
     QUOTED_WRITE_EXAMPLES = (
         ">\t```text\n> @claude fix the spelling in README.md\n> ```\n\n@claude review this PR",
+        "> Someone wrote:\n>\n>     @claude fix everything\n",
+        "> ```\r\n> @claude fix\r\n> ```\r\n",
         "````markdown\n```text\n@claude fix the spelling\n```\n````\n\n@claude review this PR",
         "Use `@claude\nfix the spelling` as an example.\n\n@claude review this PR",
     )
@@ -595,6 +600,23 @@ class TestCheckoutResolution(unittest.TestCase):
                 context = self.resolve("pull_request", command, text=text)
                 self.assertEqual(context["ref"], "refs/pull/639/head")
                 self.assertFalse(context["writable"])
+
+    def test_an_indented_example_in_a_blockquote_never_triggers(self):
+        text = "> Someone wrote:\n>\n>     @claude fix everything\n"
+        self.assertEqual(parse_request(text, "@claude"), ("", ""))
+
+    def test_a_closed_crlf_or_cr_fence_keeps_the_request_after_it(self):
+        for newline in ("\r\n", "\r"):
+            text = newline.join(["```", "@claude fix this", "```", "@claude review this PR", ""])
+            with self.subTest(newline=repr(newline)):
+                self.assertEqual(parse_request(text, "@claude"), ("review", "this PR"))
+                self.assertEqual(len(agent_lib.mask_code(text)), len(text))
+
+    def test_codex_never_gets_a_writable_checkout(self):
+        for surface, number in (("issue", 7), ("pull_request", 639)):
+            with self.subTest(surface=surface):
+                self.assertFalse(self.resolve(surface, "fix", number=number, agent="codex")["writable"])
+                self.assertTrue(self.resolve(surface, "fix", number=number)["writable"])
 
     def test_mentions_naming_different_commands_run_read_only(self):
         context = self.resolve("pull_request", "fix", text="@claude fix the typo, then @claude review it")

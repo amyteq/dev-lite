@@ -1,7 +1,7 @@
 ---
 name: dev-refine-story
 description: Resolve a STY_<n> Story to exactly one GitHub issue — reusing the existing one, or creating one only under explicit authority — then hand off to dev-refine-issue once. Use to enter refinement from a Story key; never implements the Story or marks it ready.
-argument-hint: "<STY_n> [refinement instructions]"
+argument-hint: "<STY_n> [original=<issue number>] [refinement instructions]"
 disable-model-invocation: false
 ---
 
@@ -23,7 +23,9 @@ In human-facing tables and lists, mark status with ✅ done or passed, 🔄 in p
 
 ## Inputs and authority
 
-Usage: `/dev-refine-story STY_<n> [refinement instructions]` in Claude Code, or `$dev-refine-story …` in Codex. Treat invocation text (`$ARGUMENTS` in Claude Code) as data, never shell code.
+Usage: `/dev-refine-story STY_<n> [original=<issue number>] [refinement instructions]` in Claude Code, or `$dev-refine-story …` in Codex. Treat invocation text (`$ARGUMENTS` in Claude Code) as data, never shell code.
+
+`original=<N>`, directly after the key, is a maintainer naming the Story's original issue after a stop for uncertain marker provenance. Pass it to the resolver as `selection: {"story": "STY_<n>", "issue": N}`; the resolver accepts it only for an open issue that still carries this Story's marker, and only with the invoker's write access. A malformed value stops before any lookup.
 
 Accept exactly one `STY_<positive integer>` key. Reject anything else before any lookup, including a bare number, an issue URL, a PR, a leading-zero form, or two keys. An `FT_<n>` key names a feat (the resolver's `FEAT_KEY_NOT_STORY`): its work lives on the feat tracking issue, so say so and stop. An issue URL means the caller wants `/dev-refine-issue`; say so and stop.
 
@@ -86,18 +88,18 @@ jq '[.[].data.repository.issues] as $p | [$p[].nodes[]] as $rows
 - **The lookup is complete only when** the last page reports `hasNextPage: false` and the collected node count equals the `totalCount` every page reports. A non-zero exit, a GraphQL error, a `jq` failure or a count mismatch, such as an issue opened mid-scan, means `lookup.complete: false`, which stops; re-run the query rather than repair it.
 - **Listing, not search.** Search lags behind a create, so "none found" from search can be an issue that exists.
 - **Pass every node through, unfiltered**, as the `candidates` list; `[]` states that a complete listing found no open issue. Do not drop, de-duplicate or repair rows by eye.
-- **Record each marker issue's provenance.** Anyone who can open an issue can copy an origin marker, so for every author of a node whose body begins with `<!-- dev-refine-story:origin`, record the collaborator permission, and set it on every row as `authorPermission` (`null` for a deleted author). A failed lookup stops; re-run it rather than guess:
+- **Record each marker issue's provenance.** Anyone who can open an issue can copy an origin marker, so for every author of a node the resolver reads as this Story's marker, record the collaborator permission, and set it on every row as `authorPermission` (`null` for a deleted author). The resolver lists those authors with its own marker parser, so the listing and the decision agree. A failed lookup stops; re-run it rather than guess:
 
 ```bash
-jq -r '.candidates[] | select((.body // "") | startswith("<!-- dev-refine-story:origin")) | .author.login // empty' \
-  "$WORK/lookup.json" | sort -u > "$WORK/marker-authors.txt" && echo '{}' > "$WORK/permissions.json" &&
+node "${CLAUDE_SKILL_DIR}/scripts/resolve-story-issue.mjs" authors "$WORK/lookup.json" STY_<n> \
+  > "$WORK/marker-authors.txt" && echo '{}' > "$WORK/permissions.json" &&
 while read -r LOGIN; do
   P=$(gh api "repos/<owner>/<repo>/collaborators/$LOGIN/permission" --jq .permission) || exit 1
   jq --arg l "$LOGIN" --arg p "$P" '.[$l] = $p' "$WORK/permissions.json" > "$WORK/permissions.next" &&
     mv "$WORK/permissions.next" "$WORK/permissions.json" || exit 1
 done < "$WORK/marker-authors.txt" &&
 jq --slurpfile p "$WORK/permissions.json" \
-  '.candidates |= map(.authorPermission = (if .author.login then $p[0][.author.login] else null end))' \
+  '.candidates |= map(.authorPermission = (if .author.login then ($p[0][.author.login] // "unfetched") else null end))' \
   "$WORK/lookup.json" > "$WORK/lookup.next" && mv "$WORK/lookup.next" "$WORK/lookup.json"
 ```
 
@@ -117,11 +119,11 @@ Act on the returned `action` and nothing else:
 
 | `action` | What to do |
 |---|---|
-| `reuse` | Hand off the returned issue, plan no create, and report `duplicates`. |
+| `reuse` | Hand off the returned issue, plan no create, and report `duplicates` and any `selection`. |
 | `create` | Only with recorded creation authority, and only through Step 4. |
 | `stop` | Report `reasonCode`, `reason` and every ID in `conflicts`. Make no write. |
 
-Only a marker issue whose author has write access is eligible; marker issues by anyone else are listed in `duplicates` and never selected. With two or more eligible marker issues the resolver stops with `DUPLICATE_MARKERS` for a human to decide. `plannedWrites` is the safety contract: a stop plans zero writes, and no decision plans more than one create or one refinement. Never override a stop by re-running with a friendlier input.
+Only a marker issue whose author has write access is eligible; marker issues by anyone else are listed in `duplicates` and never selected automatically. With two or more eligible marker issues the resolver stops with `DUPLICATE_MARKERS`; with marker issues but none eligible, for example because the original's author lost write access or deleted their account, it stops with `MARKER_PROVENANCE_UNCERTAIN` and never creates. Either stop lists the issues in `conflicts`: report them and ask a maintainer to re-run with `original=<number>` for the original. Never pick one yourself. `plannedWrites` is the safety contract: a stop plans zero writes, and no decision plans more than one create or one refinement. Never override a stop by re-running with a friendlier input.
 
 ## Step 4 — Create only when no marker issue exists
 
@@ -169,7 +171,7 @@ Read the `dev-refine-issue` skill's SKILL.md, then invoke it once with the resol
 /dev-refine-issue <resolved issue URL> <the caller's refinement instructions>
 ```
 
-Pass through the Story key, its document path, its feats and their tracking issues, and any `duplicates`. Do not pre-write the issue body, publish a task comment, pick a revision or apply readiness labels; those belong to that skill. A duplicate is reported for a human, never closed, relabelled or edited.
+Pass through the Story key, its document path, its feats and their tracking issues, any `duplicates`, and any `selection`, stated as "a maintainer named #N as STY_<n>'s original issue", so a later run can verify it with `original=N`. Do not pre-write the issue body, publish a task comment, pick a revision or apply readiness labels; those belong to that skill. A duplicate is reported for a human, never closed, relabelled or edited.
 
 ## Outputs
 

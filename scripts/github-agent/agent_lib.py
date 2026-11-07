@@ -53,18 +53,12 @@ AGENT_DEFAULTS: dict[str, dict[str, str]] = {
         "MODEL": "",  # Let the installed CLI choose unless the repository overrides it.
         "EFFORT": "",  # Optional `--effort`; empty keeps the CLI default.
         "MAX_TURNS": "100",
-        # Empty means "run with --dangerously-skip-permissions". Only actors with
-        # repository write access reach the launcher, which is what makes that
-        # acceptable; set this variable to narrow the tool surface instead.
+        # Empty keeps every read/edit tool; a list narrows them. It never adds one.
         "ALLOWED_TOOLS": "",
     },
     "codex": {
         "MODEL": "",
         "EFFORT": "",
-        # Writable jobs default to workspace-write; a maintainer may explicitly
-        # choose danger-full-access on the disposable runner. Fork/read-only
-        # requests always force read-only regardless of this setting.
-        "SANDBOX": "workspace-write",
     },
 }
 
@@ -304,20 +298,49 @@ def sanitize_mentions(text: str) -> str:
     return text
 
 
-# A fence opens on a line indented at most three spaces and runs to a closing fence
-# of the same character at least as long, or to the end of the text when unclosed.
-_FENCED_CODE = re.compile(r"^ {0,3}(`{3,}|~{3,}).*?(?:^ {0,3}\1[`~]*[ \t]*$|\Z)", re.DOTALL | re.MULTILINE)
+# Blockquote markers that open a line; code inside a quote is still code.
+_QUOTE_PREFIX = re.compile(r"(?: {0,3}>[ \t]?)*")
+_FENCE_OPEN = re.compile(r" {0,3}(`{3,}|~{3,})")
+# shortcut: any line indented four or more columns inside its quote is treated as an
+# indented code block, even a list continuation; a mention there is ignored, never obeyed.
+_INDENTED_CODE = re.compile(r"(?: {4}| {0,3}\t)[ \t]*\S")
 # Backtick or tilde runs paired anywhere, such as a multi-line inline code span.
 _PAIRED_FENCES = re.compile(r"```.*?```|~~~.*?~~~", re.DOTALL)
-# shortcut: any line indented four or more columns is treated as an indented code
-# block, even a list continuation; a mention there is ignored rather than obeyed.
-_INDENTED_CODE = re.compile(r"^(?: {4}| {0,3}\t).*$", re.MULTILINE)
 _INLINE_CODE = re.compile(r"(`+)[^\n]*?\1")
+_LINES = re.compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+$")
 
 
 def _blank(match: re.Match[str]) -> str:
-    """Replace a span with spaces, keeping newlines so offsets stay aligned."""
-    return "".join("\n" if char == "\n" else " " for char in match.group(0))
+    """Replace a span with spaces, keeping line breaks so offsets stay aligned."""
+    return "".join(char if char in "\r\n" else " " for char in match.group(0))
+
+
+def _code_lines(text: str) -> list[tuple[int, int]]:
+    """Spans of fenced and indented code lines, read through blockquote markers.
+
+    Lines end at LF, CRLF or CR. A fence closes on a run of its own character at
+    least as long, or when its blockquote ends; an unclosed fence runs to the end.
+    """
+    spans = []
+    fence = None  # (character, length, quote depth) of the open fence
+    for line in _LINES.finditer(text):
+        content = line.group(0).rstrip("\r\n")
+        prefix = _QUOTE_PREFIX.match(content).group(0)
+        depth, rest = prefix.count(">"), content[len(prefix):]
+        if fence and depth < fence[2]:
+            fence = None
+        if fence:
+            closer = rest.strip(" \t")
+            if len(rest) - len(rest.lstrip(" ")) <= 3 and closer and set(closer) == {fence[0]} and len(closer) >= fence[1]:
+                fence = None
+        elif opener := _FENCE_OPEN.match(rest):
+            run = opener.group(1)
+            if not (run[0] == "`" and "`" in rest[opener.end():]):
+                fence = (run[0], len(run), depth)
+        elif not _INDENTED_CODE.match(rest):
+            continue
+        spans.append((line.start() + len(prefix), line.start() + len(content)))
+    return spans
 
 
 def mask_code(text: str) -> str:
@@ -327,14 +350,13 @@ def mask_code(text: str) -> str:
     what documentation, and this repository's own pull requests about these
     workflows, have to do.
     """
-    # Each block rule reads the original text and their spans are united, so a
-    # span one rule misreads is still covered by another; over-masking only ignores.
-    chars = list(text or "")
-    for pattern in (_FENCED_CODE, _PAIRED_FENCES, _INDENTED_CODE):
-        for match in pattern.finditer(text or ""):
-            for index in range(*match.span()):
-                if chars[index] != "\n":
-                    chars[index] = " "
+    text = text or ""
+    chars = list(text)
+    spans = _code_lines(text) + [match.span() for match in _PAIRED_FENCES.finditer(text)]
+    for start, end in spans:
+        for index in range(start, end):
+            if chars[index] not in "\r\n":
+                chars[index] = " "
     return _INLINE_CODE.sub(_blank, "".join(chars))
 
 

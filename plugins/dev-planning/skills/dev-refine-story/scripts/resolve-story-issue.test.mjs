@@ -6,13 +6,13 @@
 // documents name no real Story.
 import assert from 'node:assert';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   resolveStoryIssue, matchesStoryKey, parseStoryKey, parseRunMarker, markerOf, normalizeState, issueNumber,
-  canonicalStoryDocPath,
+  canonicalStoryDocPath, markerAuthors,
 } from './resolve-story-issue.mjs';
 
 let pass = 0;
@@ -98,13 +98,57 @@ cases('a marker copied by an author without write access is never selected', [
   ...['read', 'triage', 'none', null, ' Read '].map((p) => [`a newer copy by ${String(p)}`,
     can({ candidates: [marked(10), marked(20, { authorPermission: p })] }),
     { action: 'reuse', code: 'REUSE_MARKED', selected: 10, duplicates: [20], writes: REUSE, reason: ['#20'] }]),
-  ['the only marker issue is a copy: create, reporting it', can({ candidates: [marked(20, { authorPermission: 'read' })] }),
-    { ...CREATED, duplicates: [20], reason: ['#20'] }],
-  ['the only marker issue is a copy, without authority', input({ candidates: [marked(20, { authorPermission: 'triage' })] }),
-    { code: 'CREATE_NOT_AUTHORIZED' }],
+  ['the only marker issue lacks a writer: stop, naming it', can({ candidates: [marked(20, { authorPermission: 'read' })] }),
+    { code: 'MARKER_PROVENANCE_UNCERTAIN', conflicts: [20], reason: ['#20', 'original=<number>'] }],
+  ['the only marker issue lacks a writer, without authority', input({ candidates: [marked(20, { authorPermission: 'triage' })] }),
+    { code: 'MARKER_PROVENANCE_UNCERTAIN', conflicts: [20] }],
   ['one eligible beside two copies', can({ candidates: [marked(30, { authorPermission: 'none' }), marked(5, { authorPermission: 'Admin' }), marked(9, { authorPermission: 'read' })] }),
     { selected: 5, duplicates: [9, 30] }],
 ]);
+
+// F023: a genuine author who lost write access, or whose account is gone, cannot be told from a copier.
+cases('a marker issue of uncertain provenance never leads to a create', [
+  ...['read', 'none', null].map((p) => [`the original's author is now ${String(p)}`,
+    can({ candidates: [row(5), marked(10, { authorPermission: p })] }), { action: 'stop', code: 'MARKER_PROVENANCE_UNCERTAIN', conflicts: [10] }]),
+  ['two marker issues, neither by a writer', can({ candidates: [marked(30, { authorPermission: null }), marked(10, { authorPermission: 'read' })] }),
+    { code: 'MARKER_PROVENANCE_UNCERTAIN', conflicts: [10, 30], reason: ['#10, #30'] }],
+  ['a closed marker issue by a former writer does not block', can({ candidates: [marked(10, { authorPermission: null, state: 'closed' })] }), CREATED],
+]);
+
+const pick = (issue, story = KEY) => ({ selection: { story, issue } });
+cases('a maintainer-named original is reused only when this listing confirms it', [
+  ['the named uncertain issue', can({ candidates: [marked(10, { authorPermission: null }), marked(20, { authorPermission: 'read' })], ...pick(10) }),
+    { action: 'reuse', code: 'REUSE_SELECTED', selected: 10, duplicates: [20], writes: REUSE, url: url(10) }],
+  ['one of several eligible issues', can({ candidates: [marked(10), marked(20)], ...pick(20) }), { code: 'REUSE_SELECTED', selected: 20, duplicates: [10] }],
+  ['the key in another casing', can({ candidates: [marked(10, { authorPermission: null })], ...pick(10, 'sty_112') }), { code: 'REUSE_SELECTED', selected: 10 }],
+  ['another Story', can({ candidates: [marked(10, { authorPermission: null })], ...pick(10, 'STY_113') }), { code: 'SELECTION_MISMATCH', conflicts: [10] }],
+  ['an issue without the marker', can({ candidates: [row(9), marked(10, { authorPermission: null })], ...pick(9) }), { code: 'SELECTION_MISMATCH', conflicts: [10] }],
+  ['a closed marker issue', can({ candidates: [marked(10, { state: 'closed', authorPermission: null })], ...pick(10) }), { code: 'SELECTION_MISMATCH', conflicts: [] }],
+  ...[{}, { issue: '10' }, { story: KEY }, 'STY_112#10'].map((sel) => [`an unusable selection ${JSON.stringify(sel)}`,
+    can({ candidates: [marked(10, { authorPermission: null })], selection: sel }), { code: 'SELECTION_MISMATCH' }]),
+  ['a selector without write access', can({ candidates: [marked(10, { authorPermission: null })], ...pick(10), authority: { createAuthorized: false, effectivePermission: 'triage' } }),
+    { code: 'INSUFFICIENT_PERMISSION' }],
+  ['a locked named issue', can({ candidates: [marked(10, { authorPermission: null, locked: true })], ...pick(10) }), { code: 'ISSUE_LOCKED', conflicts: [10] }],
+]);
+
+check('the listing asks for every marker author the resolver reads, leading whitespace included', () => {
+  const lookup = { candidates: [
+    { body: `  ${origin()}\nStory`, author: { login: 'writer-a' } }, { body: `${origin()}\r\nx`, author: { login: 'writer-b' } },
+    { body: `<!-- dev-refine-story:origin story=${KEY} run=x -->`, author: { login: 'writer-c' } }, { body: `${origin('STY_113')}`, author: { login: 'other' } },
+    { body: 'Unrelated', author: { login: 'plain' } }, { body: origin(), author: null }, { body: origin(), author: { login: 'writer-a' } },
+  ] };
+  assert.deepStrictEqual(markerAuthors(lookup, KEY), ['writer-a', 'writer-b', 'writer-c']);
+  const dir = mkdtempSync(join(tmpdir(), 'refine-story-'));
+  try {
+    const file = join(dir, 'lookup.json');
+    writeFileSync(file, JSON.stringify(lookup));
+    const r = spawnSync(process.execPath, [fileURLToPath(here('./resolve-story-issue.mjs')), 'authors', file, KEY], { encoding: 'utf8' });
+    assert.deepStrictEqual([r.status, r.stdout], [0, 'writer-a\nwriter-b\nwriter-c\n']);
+    assert.strictEqual(spawnSync(process.execPath, [fileURLToPath(here('./resolve-story-issue.mjs')), 'authors', file, 'FT_1']).status, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 cases('an open marker issue without fetched provenance stops', [
   ...[undefined, 1, true, {}].map((p) => [`authorPermission ${JSON.stringify(p)}`,

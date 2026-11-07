@@ -184,6 +184,36 @@ check('invalid build usage exits 2, and a committed break exits 1 naming its pat
 
 // --- next free numbers ---------------------------------------------------------
 
+check('an empty category allocates nothing, so a story-only amendment can proceed', () => {
+  const dir = temp(fs.mkdtempSync(path.join(os.tmpdir(), 'next-')));
+  fs.writeFileSync(path.join(dir, 'index.json'), serializeIndex(indexFromDocs('a'.repeat(40), docsOf())));
+  const r = cli(['next', path.join(dir, 'index.json'), 'feat', '0']);
+  assert.deepStrictEqual([r.status, r.stdout], [0, '']);
+});
+
+// The materialize step's open-PR scan, run as written with a stub `gh`: the files endpoint stops at
+// 3,000 paths, so a PR whose listing is shorter than its `changed_files` must stop the scan.
+check('materialize stops when a PR lists fewer files than it changed', () => {
+  const md = fs.readFileSync(path.join(path.dirname(SCRIPT), 'references/materialize.md'), 'utf8');
+  const script = /paginate to the end[^]*?```bash\n([^]*?)```/.exec(md)[1];
+  const dir = temp(fs.mkdtempSync(path.join(os.tmpdir(), 'scan-')));
+  fs.mkdirSync(path.join(dir, 'bin'));
+  fs.writeFileSync(path.join(dir, 'bin', 'gh'), `#!/bin/sh
+case "$*" in
+  *'pulls?state=open'*) echo 7 ;;
+  *pulls/7/files*) echo src/a.ts; echo docs/stories/STY_150_x.md ;;
+  *pulls/7*) echo "$CHANGED" ;;
+  *) exit 1 ;;
+esac
+`, { mode: 0o755 });
+  const run = (changed) => spawnSync('bash', ['-c', script.replaceAll('$S', dir)], { encoding: 'utf8',
+    env: { ...process.env, PATH: `${path.join(dir, 'bin')}:${process.env.PATH}`, CHANGED: changed } });
+  const whole = run('2');
+  assert.strictEqual(whole.status, 0, whole.stderr);
+  assert.strictEqual(fs.readFileSync(path.join(dir, 'open-pr-docs.txt'), 'utf8'), '7 docs/stories/STY_150_x.md\n');
+  assert.notStrictEqual(run('3001').status, 0, 'a truncated file list must stop the scan');
+});
+
 check('next numbers start at 101, pass every held number and never fill a gap', () => {
   const empty = { rows: [] };
   assert.deepStrictEqual(nextKeys(empty, 'feat'), ['FT_101']);
@@ -196,7 +226,7 @@ check('next numbers start at 101, pass every held number and never fill a gap', 
   fs.writeFileSync(path.join(dir, 'index.json'), serializeIndex(index));
   const r = cli(['next', path.join(dir, 'index.json'), 'story', '3']);
   assert.deepStrictEqual([r.status, r.stdout], [0, 'STY_151\nSTY_152\nSTY_153\n']);
-  for (const args of [['next', path.join(dir, 'index.json')], ['next', path.join(dir, 'index.json'), 'task'], ['next', path.join(dir, 'index.json'), 'feat', '0'],
+  for (const args of [['next', path.join(dir, 'index.json')], ['next', path.join(dir, 'index.json'), 'task'], ['next', path.join(dir, 'index.json'), 'feat', '-1'],
     ['next', path.join(dir, 'missing.json'), 'feat']]) assert.strictEqual(cli(args).status, 2, args.join(' '));
 });
 

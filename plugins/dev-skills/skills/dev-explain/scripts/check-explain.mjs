@@ -200,6 +200,20 @@ export function verifyAppend({ before, planned, after }) {
   return stop('prefix-changed', 'the body no longer starts with the version read before the write; check its edit history');
 }
 
+// The current branch's open PR: the one whose head is the repository and branch it publishes to, which
+// `git for-each-ref --format='%(push)'` and `%(push:remotename)` name. A pull upstream that differs, such
+// as an integration branch, never selects; nor does a push destination Git cannot name consistently.
+const GITHUB_REMOTE = /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?\/?$/;
+export function branchCandidates({ push, remote, remoteUrl, pulls }) {
+  const prefix = `refs/remotes/${remote}/`;
+  const head = GITHUB_REMOTE.exec(remoteUrl.trim())?.[1]?.toLowerCase();
+  if (!remote || !head || !push.startsWith(prefix) || push.length === prefix.length) return [];
+  const branch = push.slice(prefix.length);
+  return [...new Set(pulls.filter((pull) => pull?.headRefName === branch
+    && `${pull.headRepositoryOwner?.login}/${pull.headRepository?.name}`.toLowerCase() === head).map((pull) => pull.number))]
+    .filter((n) => Number.isSafeInteger(n) && n > 0).sort((a, b) => a - b);
+}
+
 // ── CLI ───────────────────────────────────────────────────────────────────────────────────────────
 class InputError extends Error {}
 const fail = (message) => { throw new InputError(message); };
@@ -214,6 +228,12 @@ const SCHEMAS = {
     langEnv: [isString, 'a string ("" when unset)'],
     candidates: [(v) => Array.isArray(v) && v.every((n) => Number.isSafeInteger(n) && n > 0), 'an array of positive integers'],
   },
+  branch: {
+    push: [isString, 'the %(push) ref ("" when none)'],
+    remote: [isString, 'the %(push:remotename) ("" when none)'],
+    remoteUrl: [isString, 'the push remote URL ("" when none)'],
+    pulls: [(v) => Array.isArray(v), 'the gh pr list array'],
+  },
   labels: {
     live: [isStrings, 'an array of strings'],
     current: [isStrings, 'an array of strings'],
@@ -222,7 +242,7 @@ const SCHEMAS = {
     protected: [isStrings, 'an array of strings', 'optional'],
   },
 };
-const COMMANDS = { args: ['input'], labels: ['input'], append: ['before', 'addition', 'out'], verify: ['before', 'planned', 'after'] };
+const COMMANDS = { args: ['input'], branch: ['input'], labels: ['input'], append: ['before', 'addition', 'out'], verify: ['before', 'planned', 'after'] };
 
 // A body comes only from an API response object that has a `body` field (null when empty). An error
 // response, an empty file or any other shape is unreadable, so a failed read never becomes "".
@@ -285,6 +305,7 @@ const run = {
     const result = resolveArgs(input);
     return [result.action === 'proceed', JSON.stringify(result)];
   },
+  branch: (input) => [true, JSON.stringify(branchCandidates(input))],
   labels: (input) => {
     const result = vetLabels(input);
     return [result.refused.length === 0, JSON.stringify(result)];
