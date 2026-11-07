@@ -1,0 +1,16 @@
+{
+  "name": "dev-planning",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Planning skills for Claude Code and Codex: analyse a request pack into a reviewed proposal, and resolve a story to its one issue.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "mdast-util-from-markdown": "2.0.3"
+  }
+}

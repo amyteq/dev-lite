@@ -1,0 +1,373 @@
+{
+  "schema": "AnalyseRpProposalV1",
+  "_fixture": "Stable-seam pack on the direct path: a CSV export of one project's tasks. Expected: no findings.",
+  "baseline": {
+    "repo": "example-org/example-repo",
+    "ref": "main",
+    "commit": "3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f",
+    "worktree_status_porcelain": "",
+    "request_pack": {
+      "id": "RP-12",
+      "origin": "https://github.com/example-org/example-repo/issues/12#issuecomment-1000000012"
+    },
+    "planning_index": {
+      "digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "counts": {
+        "feat": 1,
+        "story": 0
+      }
+    }
+  },
+  "boundary": {
+    "statement": "A CSV export of one project's tasks, inside the existing reports module convention.",
+    "actors": [
+      "project member",
+      "project admin",
+      "repository owner"
+    ],
+    "outcomes": [
+      "a member can export one project's tasks as a CSV file",
+      "an admin can see which exports ran and who ran them"
+    ],
+    "exclusions": [
+      "scheduled or background exports",
+      "export formats other than CSV",
+      "changes to task permissions"
+    ]
+  },
+  "path": "direct",
+  "seam_evidence": [
+    {
+      "contract": "Report endpoints register in the reports module index",
+      "location": "src/reports/index.ts:12"
+    },
+    {
+      "contract": "Task reads go through the access-checked task repository",
+      "location": "src/tasks/repository.ts:40 listForProject()"
+    },
+    {
+      "contract": "Module tests are plain Node files run by the test script",
+      "location": "package.json:scripts.test"
+    }
+  ],
+  "journey": [
+    {
+      "id": "J-1",
+      "step": "a member opens a project's task list"
+    },
+    {
+      "id": "J-2",
+      "step": "the member exports the list and opens the file"
+    },
+    {
+      "id": "J-3",
+      "step": "an admin reviews which exports ran",
+      "deferral": "Served by the export log U-1 writes; no separate slice is proposed inside this boundary."
+    }
+  ],
+  "sources": [
+    {
+      "id": "SRC-1",
+      "title": "Issue #12 request: task export acceptance criteria",
+      "origin": "https://github.com/example-org/example-repo/issues/12",
+      "included": true,
+      "omission_reason": null
+    },
+    {
+      "id": "SRC-2",
+      "title": "Reports module conventions",
+      "origin": "docs/specs/reports.md",
+      "included": true,
+      "omission_reason": null
+    },
+    {
+      "id": "SRC-3",
+      "title": "Task access rules",
+      "origin": "docs/specs/task-access.md",
+      "included": true,
+      "omission_reason": null
+    },
+    {
+      "id": "SRC-4",
+      "title": "CSV format notes",
+      "origin": "docs/specs/csv-format.md",
+      "included": true,
+      "omission_reason": null
+    },
+    {
+      "id": "SRC-5",
+      "title": "#7 notes on an abandoned export prototype",
+      "origin": "https://github.com/example-org/example-repo/issues/7#issuecomment-1000000007",
+      "included": false,
+      "omission_reason": "Historical discussion of an abandoned export prototype; the current rules are read from the specs instead, so it is not a source of authority here."
+    }
+  ],
+  "coverage": [
+    {
+      "source_id": "SRC-1",
+      "disposition": "owned",
+      "unit_id": "U-1"
+    },
+    {
+      "source_id": "SRC-2",
+      "disposition": "owned",
+      "unit_id": "U-2"
+    },
+    {
+      "source_id": "SRC-3",
+      "disposition": "owned",
+      "unit_id": "U-1"
+    },
+    {
+      "source_id": "SRC-4",
+      "disposition": "owned",
+      "unit_id": "U-3"
+    }
+  ],
+  "slices": [
+    {
+      "id": "SL-1",
+      "outcome": "A member can download one project's tasks as a CSV file.",
+      "journey_step": "J-1"
+    },
+    {
+      "id": "SL-2",
+      "outcome": "An export holds only the tasks its member may read.",
+      "journey_step": "J-2"
+    },
+    {
+      "id": "SL-3",
+      "outcome": "Members find the export from the task list and the help page.",
+      "journey_step": "J-1"
+    }
+  ],
+  "units": [
+    {
+      "id": "U-1",
+      "slice_id": "SL-1",
+      "kind": "unit",
+      "outcomes": [
+        "A member gets one project's tasks as a CSV file that the help page describes."
+      ],
+      "decision_surface": "Which task fields the export writes, and in what order.",
+      "seam": "src/reports/task-export.ts plus its CSV writer",
+      "scope": [
+        "the export endpoint and its CSV writer for one project"
+      ],
+      "non_goals": [
+        "no scheduled exports",
+        "no export formats other than CSV",
+        "no changes to task permissions"
+      ],
+      "acceptance": [
+        "the file has a header row and one row per task",
+        "each row holds the task's id, title, assignee and due date",
+        "each export is logged with the actor, the project and the time"
+      ],
+      "validation": [
+        "endpoint tests over a fixture project with three tasks"
+      ],
+      "write_boundary": [
+        "src/reports/task-export.ts",
+        "src/reports/csv/*.ts"
+      ],
+      "rollback": "remove the endpoint; nothing links to it until U-3 lands",
+      "split_rationale": "One outcome and one decision surface: the export file. Splitting the writer out would leave an endpoint with nothing to return and a writer with no caller - a non-testable half.",
+      "owner": "@example-owner",
+      "open_decisions": [],
+      "blockers": [],
+      "provisional": false,
+      "frozen_signatures": false,
+      "tripwires": {
+        "files": 4,
+        "acs": 3,
+        "breached": false,
+        "disposition": null,
+        "owner_gate": null
+      },
+      "home": {
+        "relation": "new",
+        "key": "FT_101",
+        "level": "feat",
+        "evidence": "Fixture: the index has no story whose outcome or seam matches this unit.",
+        "search": [
+          "index rows of FT_101 by observable outcome and seam"
+        ]
+      }
+    },
+    {
+      "id": "U-2",
+      "slice_id": "SL-2",
+      "kind": "unit",
+      "outcomes": [
+        "An export holds only the tasks its member may read, filtered by the access-checked task repository."
+      ],
+      "decision_surface": "Which access rule filters an exported row.",
+      "seam": "src/reports/csv/rows.ts through the access-checked task repository",
+      "scope": [
+        "access filtering of exported task rows"
+      ],
+      "non_goals": [
+        "no new permission model",
+        "no new dependency",
+        "no general reporting framework"
+      ],
+      "acceptance": [
+        "a member who may read two of three tasks gets exactly two rows",
+        "an archived task never appears in an export",
+        "a project the member cannot open returns no file"
+      ],
+      "validation": [
+        "fixture tests run by the repository's test script"
+      ],
+      "write_boundary": [
+        "src/reports/csv/rows.ts",
+        "src/reports/test/fixtures/*.json",
+        "src/reports/test/rows.test.ts",
+        "package.json"
+      ],
+      "rollback": "remove the module, its fixtures and the one test-script entry",
+      "split_rationale": "One outcome - access-filtered rows - over one bounded module. The archived-task rule and the permission rule share the row query, so splitting them would duplicate the query and leave neither half independently provable.",
+      "owner": "@example-owner",
+      "open_decisions": [],
+      "blockers": [],
+      "provisional": false,
+      "frozen_signatures": false,
+      "tripwires": {
+        "files": 12,
+        "acs": 3,
+        "breached": false,
+        "disposition": null,
+        "owner_gate": null
+      },
+      "home": {
+        "relation": "new",
+        "key": "FT_101",
+        "level": "feat",
+        "evidence": "Fixture: the index has no story whose outcome or seam matches this unit.",
+        "search": [
+          "index rows of FT_101 by observable outcome and seam"
+        ]
+      }
+    },
+    {
+      "id": "U-3",
+      "slice_id": "SL-3",
+      "kind": "unit",
+      "outcomes": [
+        "Members reach the export from the task list, and the help page lists it with the other reports."
+      ],
+      "decision_surface": "Where the export button lives and how the help page links to it.",
+      "seam": "the task-list toolbar plus the reports help page",
+      "scope": [
+        "the task-list export button and the help-page entry for the export"
+      ],
+      "non_goals": [
+        "no second export entry point",
+        "no email delivery"
+      ],
+      "acceptance": [
+        "one export button on the task list",
+        "the reports help page lists the export with its columns and limits"
+      ],
+      "validation": [
+        "a UI test clicks the button and receives the file; the help-page link check passes"
+      ],
+      "write_boundary": [
+        "src/ui/task-list/toolbar.tsx",
+        "docs/specs/csv-format.md",
+        "docs/help/reports.md",
+        "package.json"
+      ],
+      "rollback": "remove the button and revert the help-page entry",
+      "split_rationale": "One outcome - discoverability - across two surfaces that must agree. Splitting the button from the help entry would ship an export documented nowhere, or documented with no way to reach it.",
+      "owner": "@example-owner",
+      "open_decisions": [],
+      "blockers": [],
+      "provisional": false,
+      "frozen_signatures": false,
+      "tripwires": {
+        "files": 3,
+        "acs": 2,
+        "breached": false,
+        "disposition": null,
+        "owner_gate": null
+      },
+      "home": {
+        "relation": "new",
+        "key": "FT_101",
+        "level": "feat",
+        "evidence": "Fixture: the index has no story whose outcome or seam matches this unit.",
+        "search": [
+          "index rows of FT_101 by observable outcome and seam"
+        ]
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "U-2",
+      "to": "U-1",
+      "type": "contract",
+      "blocks_pickup": true,
+      "reason": "The row filter feeds the CSV writer the export endpoint declares; the column names must exist before the filter can be written against them.",
+      "evidence": "src/reports/csv/columns.ts declares the export columns"
+    },
+    {
+      "from": "U-3",
+      "to": "U-1",
+      "type": "contract",
+      "blocks_pickup": true,
+      "reason": "The button and the help entry call the export endpoint and quote its columns; there is nothing to call first.",
+      "evidence": "src/reports/index.ts registers each report endpoint by path"
+    },
+    {
+      "from": "U-3",
+      "to": "U-2",
+      "type": "coordination",
+      "blocks_pickup": false,
+      "reason": "Both add their test files to package.json, so they need sequencing, not a pickup block.",
+      "evidence": "package.json:scripts.test is a single line edited by both units",
+      "conflict_path": "package.json"
+    },
+    {
+      "from": "U-3",
+      "to": "U-2",
+      "type": "qualification",
+      "blocks_pickup": false,
+      "reason": "The release check runs the full test set over both units, which affects when the PR can be claimed validated, not when either unit can be picked up.",
+      "evidence": "package.json:scripts.ci runs the full test set"
+    }
+  ],
+  "decisions": [],
+  "verdict": {
+    "state": "proposal_complete",
+    "next_human_action": "Owner reviews the packet and decides whether to dispatch implementation of U-1 through U-3 as one bounded PR.",
+    "evidence_limits": "Walkthrough output from one analyst session; the checker proves bookkeeping only, and no live multi-session pilot was run."
+  },
+  "review": {
+    "reviewer": "Fresh-context independent reviewer, given the baseline, source manifest, packet, projection and checker output.",
+    "verdict": "sound",
+    "findings": [
+      {
+        "id": "F-1",
+        "severity": "P1",
+        "claim": "The coordination edge did not name the file it schedules around.",
+        "disposition": "accepted"
+      },
+      {
+        "id": "F-2",
+        "severity": "P2",
+        "claim": "U-2 should be split into the permission filter and the archived-task filter.",
+        "disposition": "rejected",
+        "reason": "They share the row query; splitting duplicates it and leaves neither half independently provable."
+      }
+    ]
+  },
+  "homes": [
+    {
+      "key": "FT_101",
+      "level": "feat"
+    }
+  ]
+}

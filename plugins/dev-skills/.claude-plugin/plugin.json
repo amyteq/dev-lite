@@ -1,0 +1,10 @@
+{
+  "name": "dev-skills",
+  "version": "0.1.0",
+  "description": "Agent skills for GitHub work: bounded PR review/fix rounds with independent sessions, issue refinement into work orders, decision explanations, and thread compaction.",
+  "author": { "name": "amyteq", "url": "https://github.com/amyteq" },
+  "homepage": "https://github.com/amyteq/dev-lite",
+  "repository": "https://github.com/amyteq/dev-lite",
+  "license": "MIT",
+  "keywords": ["code-review", "github", "issues", "skills"]
+}

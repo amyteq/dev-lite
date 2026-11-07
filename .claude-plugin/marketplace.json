@@ -1,0 +1,26 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "dev-lite",
+  "description": "Lightweight agent skills, guardrail hooks and GitHub workflows for Claude Code and Codex.",
+  "owner": { "name": "amyteq", "url": "https://github.com/amyteq" },
+  "plugins": [
+    {
+      "name": "dev-skills",
+      "source": "./plugins/dev-skills",
+      "description": "Review PRs in bounded rounds, refine issues into work orders, explain pending decisions, compact long threads.",
+      "category": "development"
+    },
+    {
+      "name": "dev-planning",
+      "source": "./plugins/dev-planning",
+      "description": "Plan features and stories (FT_/STY_ docs) and refine stories into dispatchable work.",
+      "category": "development"
+    },
+    {
+      "name": "dev-hooks",
+      "source": "./plugins/dev-hooks",
+      "description": "Guardrail and audit hooks: deny destructive or secret-reading calls, block merging other people's PRs, log redacted events.",
+      "category": "security"
+    }
+  ]
+}

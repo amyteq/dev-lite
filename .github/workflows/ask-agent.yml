@@ -1,0 +1,335 @@
+# Reusable pipeline behind the `@claude` and `@codex` mention workflows of any
+# repository. Callers are the thin files in templates/github/; the logic lives in
+# scripts/github-agent/. See scripts/github-agent/README.md.
+#
+# Every job checks out this repository's scripts at the exact commit the caller
+# resolved for this workflow file (`job.workflow_repository` @ `job.workflow_sha`),
+# so the scripts always match the workflow version the caller pinned and never
+# come from the caller's checkout.
+name: Ask agent
+
+on:
+  workflow_call:
+    inputs:
+      agent:
+        description: "claude or codex"
+        required: true
+        type: string
+      base_branch:
+        description: "Branch that issue and discussion work starts from and targets; empty means the default branch"
+        type: string
+        default: ""
+      protected_branches:
+        description: "Comma-separated branches never pushed to or targeted by a follow-up PR; the default branch is always included"
+        type: string
+        default: ""
+      project_rules:
+        description: "Extra project rules added to the agent prompt"
+        type: string
+        default: ""
+      project_rules_file:
+        description: "Path in the repository the agent must read as project rules"
+        type: string
+        default: ""
+      skill_label:
+        description: "Skill label in the reply signature when the request invokes no repository skill; empty means ask-<agent>"
+        type: string
+        default: ""
+      node_version:
+        description: "Node.js version on the execute runner"
+        type: string
+        default: "24.19.0"
+      bun_version:
+        description: "Bun version to install for project checks; empty skips Bun"
+        type: string
+        default: ""
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: false
+      CODEX_AUTH_JSON:
+        required: false
+      OPENAI_API_KEY:
+        required: false
+
+# Jobs explicitly narrow the caller's token. The model job never has write access.
+permissions: {}
+
+env:
+  AGENT: ${{ inputs.agent }}
+  BASE_BRANCH: ${{ inputs.base_branch }}
+  PROTECTED_BRANCHES: ${{ inputs.protected_branches }}
+  PROJECT_RULES: ${{ inputs.project_rules }}
+  PROJECT_RULES_FILE: ${{ inputs.project_rules_file }}
+  SKILL_LABEL: ${{ inputs.skill_label }}
+  TOOLS: ${{ github.workspace }}/.agent-tools/scripts/github-agent
+  WORK_DIR: ${{ github.workspace }}/repo
+  EVENT_FILE: ${{ github.workspace }}/request/event.json
+  PROMPT_FILE: ${{ github.workspace }}/request/prompt.txt
+  RESULT_FILE: ${{ github.workspace }}/result/result.md
+  STATUS_FILE: ${{ github.workspace }}/result/status.json
+  PATCH_FILE: ${{ github.workspace }}/result/changes.patch
+  # The caller repository's variables, passed by name. Never pass the whole
+  # `vars` context: Actions echoes job env into logs and variables are not secret.
+  CLAUDE_ACTION_ENABLED: ${{ vars.CLAUDE_ACTION_ENABLED }}
+  CODEX_ACTION_ENABLED: ${{ vars.CODEX_ACTION_ENABLED }}
+  CLAUDE_ACTION_ISSUE_COMMENT: ${{ vars.CLAUDE_ACTION_ISSUE_COMMENT }}
+  CLAUDE_ACTION_PR_REVIEW_COMMENT: ${{ vars.CLAUDE_ACTION_PR_REVIEW_COMMENT }}
+  CLAUDE_ACTION_PR_REVIEW: ${{ vars.CLAUDE_ACTION_PR_REVIEW }}
+  CLAUDE_ACTION_ISSUES: ${{ vars.CLAUDE_ACTION_ISSUES }}
+  CLAUDE_ACTION_PULL_REQUEST: ${{ vars.CLAUDE_ACTION_PULL_REQUEST }}
+  CLAUDE_ACTION_DISCUSSION_COMMENT: ${{ vars.CLAUDE_ACTION_DISCUSSION_COMMENT }}
+  CLAUDE_ACTION_DISCUSSION: ${{ vars.CLAUDE_ACTION_DISCUSSION }}
+  CLAUDE_ACTION_MODEL: ${{ vars.CLAUDE_ACTION_MODEL }}
+  CLAUDE_ACTION_EFFORT: ${{ vars.CLAUDE_ACTION_EFFORT }}
+  CLAUDE_ACTION_MAX_TURNS: ${{ vars.CLAUDE_ACTION_MAX_TURNS }}
+  CLAUDE_ACTION_ALLOWED_TOOLS: ${{ vars.CLAUDE_ACTION_ALLOWED_TOOLS }}
+  CLAUDE_ACTION_TIMEOUT_MINUTES: ${{ vars.CLAUDE_ACTION_TIMEOUT_MINUTES }}
+  CLAUDE_ACTION_CONTEXT_COMMENTS: ${{ vars.CLAUDE_ACTION_CONTEXT_COMMENTS }}
+  CLAUDE_ACTION_CONTEXT_CHARS: ${{ vars.CLAUDE_ACTION_CONTEXT_CHARS }}
+  CODEX_ACTION_ISSUE_COMMENT: ${{ vars.CODEX_ACTION_ISSUE_COMMENT }}
+  CODEX_ACTION_PR_REVIEW_COMMENT: ${{ vars.CODEX_ACTION_PR_REVIEW_COMMENT }}
+  CODEX_ACTION_PR_REVIEW: ${{ vars.CODEX_ACTION_PR_REVIEW }}
+  CODEX_ACTION_ISSUES: ${{ vars.CODEX_ACTION_ISSUES }}
+  CODEX_ACTION_PULL_REQUEST: ${{ vars.CODEX_ACTION_PULL_REQUEST }}
+  CODEX_ACTION_DISCUSSION_COMMENT: ${{ vars.CODEX_ACTION_DISCUSSION_COMMENT }}
+  CODEX_ACTION_DISCUSSION: ${{ vars.CODEX_ACTION_DISCUSSION }}
+  CODEX_ACTION_MODEL: ${{ vars.CODEX_ACTION_MODEL }}
+  CODEX_ACTION_EFFORT: ${{ vars.CODEX_ACTION_EFFORT }}
+  CODEX_ACTION_SANDBOX: ${{ vars.CODEX_ACTION_SANDBOX }}
+  CODEX_ACTION_TIMEOUT_MINUTES: ${{ vars.CODEX_ACTION_TIMEOUT_MINUTES }}
+  CODEX_ACTION_CONTEXT_COMMENTS: ${{ vars.CODEX_ACTION_CONTEXT_COMMENTS }}
+  CODEX_ACTION_CONTEXT_CHARS: ${{ vars.CODEX_ACTION_CONTEXT_CHARS }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      discussions: read
+    outputs:
+      authorized: ${{ steps.authz.outputs.ok }}
+      checkout_sha: ${{ steps.snapshot.outputs.checkout_sha }}
+      request_artifact: ${{ steps.save.outputs.artifact-id }}
+    steps:
+      - name: Require this workflow's own revision
+        env:
+          TOOLS_REPOSITORY: ${{ job.workflow_repository }}
+          TOOLS_SHA: ${{ job.workflow_sha }}
+        run: |
+          [[ -n "$TOOLS_REPOSITORY" && "$TOOLS_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo '::error::job.workflow_repository / job.workflow_sha are unavailable (GitHub Enterprise Server is not supported), so the pipeline cannot locate its scripts.'
+            exit 1
+          }
+          mkdir -p "${GITHUB_WORKSPACE}/request"
+      - name: Use the pinned Python helper runtime
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: 3.12.12
+      - name: Check out the pipeline scripts at this workflow's commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .agent-tools
+          sparse-checkout: scripts/github-agent
+          persist-credentials: false
+      - name: Route mention
+        id: route
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 "$TOOLS/normalize_event.py"
+      - name: Require repository write, maintain, or admin access
+        id: authz
+        if: steps.route.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 "$TOOLS/authorize_actor.py"
+      - name: Capture an immutable checkout revision
+        id: snapshot
+        if: steps.authz.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 "$TOOLS/snapshot_request.py"
+      - name: Gather thread context and build prompt
+        if: steps.authz.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 "$TOOLS/build_prompt.py"
+      - name: Save trusted request separately from agent output
+        id: save
+        if: steps.authz.outputs.ok == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: request-${{ inputs.agent }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: request/
+          retention-days: 1
+          if-no-files-found: error
+
+  execute:
+    needs: prepare
+    if: needs.prepare.outputs.authorized == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    outputs:
+      result_artifact: ${{ steps.save.outputs.artifact-id }}
+    steps:
+      - name: Use the pinned Python helper runtime
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: 3.12.12
+      - name: Check out the pipeline scripts at this workflow's commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .agent-tools
+          sparse-checkout: scripts/github-agent
+          persist-credentials: false
+      - name: Download the immutable authorized request
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.request_artifact }}
+          path: request
+          merge-multiple: true
+      - name: Check out the target without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.checkout_sha }}
+          path: repo
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 11.25.0
+          run_install: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ inputs.node_version }}
+      - name: Set up Bun for project checks
+        if: inputs.bun_version != ''
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ inputs.bun_version }}
+      - name: Install locked agent tools before credentials are supplied
+        run: |
+          pnpm --dir "$TOOLS/cli" install --frozen-lockfile --ignore-scripts
+          node "$TOOLS/cli/node_modules/@anthropic-ai/claude-code/install.cjs"
+          test "$("$TOOLS/cli/node_modules/.bin/claude" --version)" = "2.1.302 (Claude Code)"
+          test "$("$TOOLS/cli/node_modules/.bin/codex" --version)" = "codex-cli 0.154.0"
+          echo "$TOOLS/cli/node_modules/.bin" >> "$GITHUB_PATH"
+          mkdir -p "${GITHUB_WORKSPACE}/result"
+      - name: Run the authorized agent (no GitHub token)
+        id: agent
+        continue-on-error: true
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.agent == 'claude' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
+          CODEX_AUTH_JSON: ${{ inputs.agent == 'codex' && secrets.CODEX_AUTH_JSON || '' }}
+          OPENAI_API_KEY: ${{ inputs.agent == 'codex' && secrets.OPENAI_API_KEY || '' }}
+        run: python3 "$TOOLS/run_agent.py"
+      - name: Collect changes as untrusted patch data
+        if: always()
+        continue-on-error: true
+        run: python3 "$TOOLS/collect_changes.py"
+      - name: Save bounded agent output
+        if: always()
+        id: save
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: result-${{ inputs.agent }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            result/result.md
+            result/status.json
+            result/changes.patch
+          retention-days: 1
+          if-no-files-found: warn
+      - name: Preserve agent failure status
+        if: steps.agent.outcome == 'failure'
+        run: exit 1
+
+  publish:
+    needs: [prepare, execute]
+    if: always() && needs.prepare.outputs.authorized == 'true' && needs.prepare.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      discussions: write
+    steps:
+      - name: Use the pinned Python helper runtime
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: 3.12.12
+      # A new runner prevents the model from modifying code that later gets a write token.
+      - name: Check out the pipeline scripts at this workflow's commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .agent-tools
+          sparse-checkout: scripts/github-agent
+          persist-credentials: false
+      - name: Download trusted request by its immutable artifact ID
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.request_artifact }}
+          path: request
+          merge-multiple: true
+      - name: Recheck authorization before publishing
+        id: authz
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 "$TOOLS/authorize_actor.py"
+      - name: Prepare empty result for failed or cancelled execution
+        run: mkdir -p "${GITHUB_WORKSPACE}/result"
+      - name: Download agent result as untrusted data
+        if: steps.authz.outputs.ok == 'true' && needs.execute.outputs.result_artifact != ''
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          artifact-ids: ${{ needs.execute.outputs.result_artifact }}
+          path: result
+          merge-multiple: true
+      - name: Validate bounded regular result files
+        id: validate
+        continue-on-error: true
+        if: steps.authz.outputs.ok == 'true'
+        run: python3 "$TOOLS/validate_result.py"
+      - name: Check out the original revision for patch validation only
+        if: steps.authz.outputs.ok == 'true' && steps.validate.outcome == 'success'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.checkout_sha }}
+          path: repo
+          persist-credentials: false
+      - name: Publish an authorized patch to a new draft PR
+        id: changes
+        if: steps.authz.outputs.ok == 'true' && steps.validate.outcome == 'success' && needs.execute.result == 'success'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 "$TOOLS/publish_changes.py"
+      - name: Record patch publication failure
+        if: steps.changes.outcome == 'failure'
+        run: |
+          printf '\n\nPatch publication failed. No successful PR publication is confirmed; see the run log.\n' >> "$RESULT_FILE"
+      - name: Replace invalid or missing artifacts with a trusted failure reply
+        if: always() && steps.authz.outputs.ok == 'true' && steps.validate.outcome != 'success'
+        run: |
+          rm -rf "${GITHUB_WORKSPACE}/result"
+          mkdir -p "${GITHUB_WORKSPACE}/result"
+          printf '%s\n' 'The agent output artifact could not be validated. No patch was published; inspect the run log.' > "$RESULT_FILE"
+          printf '%s\n' '{"exit_code":1}' > "$STATUS_FILE"
+      - name: Publish reply or execution failure
+        if: always() && steps.authz.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 "$TOOLS/publish_result.py"
+      - name: Preserve publication failure status
+        if: steps.changes.outcome == 'failure' || steps.validate.outcome == 'failure'
+        run: exit 1

@@ -1,0 +1,30 @@
+# Copy to .github/workflows/ask-codex.yml on the default branch. Settings: see
+# https://github.com/amyteq/dev-lite/blob/v0/scripts/github-agent/README.md
+name: Ask Codex
+on:
+  issue_comment: { types: [created] }
+  pull_request_review_comment: { types: [created] }
+  pull_request_review: { types: [submitted] }
+  issues: { types: [opened, edited] }
+  discussion: { types: [created, edited] }
+  discussion_comment: { types: [created] }
+  workflow_dispatch:
+    inputs:
+      surface: { type: choice, options: [issue, pull_request, discussion], default: issue }
+      number: { type: string, required: true }
+      request: { type: string, required: true }
+permissions: { contents: write, pull-requests: write, issues: write, discussions: write }
+concurrency:
+  group: ask-codex-${{ github.event.issue.number || github.event.pull_request.number || github.event.discussion.number || inputs.number }}
+jobs:
+  codex:
+    if: github.event_name == 'workflow_dispatch' || contains(toJSON(github.event), '@codex')
+    uses: amyteq/dev-lite/.github/workflows/ask-agent.yml@v0
+    secrets:
+      CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    with:
+      agent: codex
+      # base_branch: develop
+      # protected_branches: develop,lovable
+      # project_rules_file: docs/agent-rules.md
