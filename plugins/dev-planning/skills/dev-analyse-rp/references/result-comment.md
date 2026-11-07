@@ -36,6 +36,7 @@ When the analysis instructions forbid GitHub changes or say "scratch only", quot
 | `feat`, verdict `analysis_stopped` | Post one stop notice, `part=1/1`, that hides nothing |
 | `no-publish` | No remote write |
 | `dry-run` | No remote write; the payloads and their commands stay in the root (§6) |
+| The model selected this skill on its own, without the invoking human's explicit request for it | No remote write unless the invoker answers yes to §4's ask |
 | Classification or root stop | No remote write |
 | Locked issue, incomplete scan, `select` other than `post`, or a check exiting `1` or `2` | No post, as in summary.md |
 
@@ -104,7 +105,7 @@ Fix `prose.json` or `context.json` and render again; a packet fix needs a new ru
 
 ## 4. The ask, when the invocation forbids GitHub changes
 
-Before the first write, ask the invoker once. Name the parts you would post and the comments you would hide.
+This also applies when the model selected this skill on its own: such a run has no write authority of its own. Before the first write, ask the invoker once. Name the parts you would post and the comments you would hide.
 
 - **Yes:** post as §5 does.
 - **No:** no remote write. Leave the payloads as §6 does, and report "not posted: declined".

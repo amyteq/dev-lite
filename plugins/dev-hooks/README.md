@@ -4,15 +4,15 @@ Claude Code hooks that keep an agent session from doing irreversible damage, plu
 
 | Hook | Event (matcher) | Behaviour |
 | --- | --- | --- |
-| `guard_tool.py` | `PreToolUse` (`Bash\|Read\|Edit\|Write`) | **Denies** `sudo`, recursive deletion of `/`, `~` or absolute paths outside `/tmp`, force push, remote branch deletion, `git filter-branch`/`filter-repo`, `gh … delete`, raw disk writes, privileged containers, and reading or sending credentials (`~/.ssh`, `~/.aws`, gcloud, `gh` hosts, `.netrc`, `secrets/`, `.env.production`, `.env.test`). **Asks** before `rm` outside `/tmp` or `$TMPDIR`, `rmdir`, `find -delete`, `git clean`, `supabase db push/reset`, destructive SQL and `docker compose down -v`. |
-| `guard_pr_merge.py` | `PreToolUse` (`Bash`) | Blocks `gh pr merge` when the PR author is not the current `gh` user. Bypass a deliberate case with `ALLOW_FOREIGN_MERGE=1`. |
-| `audit_event.py` | `PostToolUse` (`Bash\|Edit\|Write`), `ConfigChange` (`project_settings\|skills`) | Appends one redacted JSON line per event to `.claude/audit/events-YYYYMMDD.log` in the project. The folder ignores itself with its own `.gitignore`. File contents and secret values are never recorded. |
+| `guard_tool.py` | `PreToolUse` (`Bash\|Read\|Edit\|Write`) | **Denies** `sudo`, recursive deletion of `/`, `~` or absolute paths outside `/tmp`, force push (including `+` refspecs, bundled `-f` and `--mirror`), remote branch deletion (including `-d` and `--prune`), `git filter-branch`/`filter-repo`, `gh … delete`, raw disk writes, privileged containers, and reading or sending credentials (`~/.ssh`, `~/.aws`, gcloud, `gh` hosts, `.netrc`, `secrets/`, `.env.production`, `.env.test`). **Asks** before `rm` outside `/tmp` or `$TMPDIR` (an unset, relative or `/` `TMPDIR` is not a temp root), `rmdir`, `find -delete`, `git clean`, `supabase db push/reset`, destructive SQL and `docker compose down -v`. |
+| `guard_pr_merge.py` | `PreToolUse` (`Bash`) | Blocks `gh pr merge` when the PR author is not the current `gh` user, resolving the same number, URL or branch and `-R`/`--repo`/`GH_REPO` repository the CLI would act on. Bypass a deliberate case with `ALLOW_FOREIGN_MERGE=1`. |
+| `audit_event.py` | `PostToolUse` (`Bash\|Edit\|Write`), `ConfigChange` (`project_settings\|skills`) | Appends one JSON line per event to `.claude/audit/events-YYYYMMDD.log` in the project: event, session, tool, the file path or the Bash executable name. The folder ignores itself with its own `.gitignore`. Command arguments, file contents and secret values are never recorded. |
 
 ## Failure policy
 
 A rule that matches always denies or asks. If a hook itself fails (unreadable input, a missing `gh`, a bug), it allows the call, so a guard defect never locks the session. The guards match literal command spellings; they are a second line behind the sandbox and `settings.json` permissions, not a security boundary.
 
-Quoted message bodies (`-m`, `--body`, `--title`, `--notes`) and heredocs written to files are treated as data, so writing *about* a gated command is allowed. A heredoc fed to an interpreter, or a `$(…)` payload, is still matched.
+Quoted message bodies (`-m`, `--body`, `--title`, `--notes`) and literal heredocs read by `cat`, `tee`, `gh` or `git` are treated as data, so writing *about* a gated command is allowed. A heredoc fed to any other program, an unquoted heredoc whose body could expand `$`, backticks or `\`, and a `$(…)` payload are still matched.
 
 ## Test
 

@@ -381,6 +381,8 @@ def main() -> int:
             "default_branch": default_branch,
             "protected_branches": protected,
             "read_only_command": command in READ_ONLY_COMMANDS,
+            # Validated above; later steps read configuration from here, not from their environment.
+            "config": {name: value for name, value in config.variables.items() if (value or "").strip()},
             "run_url": (
                 f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/{repo}"
                 f"/actions/runs/{os.environ.get('GITHUB_RUN_ID', '')}"

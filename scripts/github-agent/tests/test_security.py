@@ -238,6 +238,32 @@ class Publication(unittest.TestCase):
             data = dest.read_bytes()
         self.assertIn(b'new.txt', data)
 
+    # Synthetic credential shapes, assembled at runtime so no literal token sits in the source.
+    FAKE_KEY = '-----BEGIN ' + 'OPENSSH PRIVATE KEY-----\nAAAA\n'
+    FAKE_AUTH = '{"tokens": {"refresh_' + 'token": "' + 'r' * 32 + '"}}\n'
+    FAKE_GITHUB = 'token = "' + 'gh' + 'p_' + 'A' * 36 + '"\n'
+
+    def test_collector_refuses_sensitive_paths_and_contents_before_upload(self):
+        for path, text in [('.env.production', 'A=1\n'), ('.codex/auth.json', '{}\n'), ('deploy.pem', 'x\n'),
+                           ('notes.txt', self.FAKE_KEY), ('config/auth.json', self.FAKE_AUTH), ('app.toml', self.FAKE_GITHUB)]:
+            with self.subTest(path=path), tempfile.TemporaryDirectory() as output:
+                Path(self.work, path).parent.mkdir(parents=True, exist_ok=True)
+                Path(self.work, path).write_text(text)
+                dest = Path(output, 'changes.patch')
+                with patch.dict(os.environ, {'WORK_DIR': self.work, 'PATCH_FILE': str(dest)}), \
+                     patch.object(collect_changes, 'load_context', return_value={'writable': True, 'checkout_sha': self.sha}), \
+                     self.assertRaises(ValueError):
+                    collect_changes.main()
+                self.assertFalse(dest.exists(), 'nothing may reach the uploaded artifact')
+                self.git('reset', '-q', '--hard', self.sha)
+                self.git('clean', '-qfdx')
+
+    def test_publisher_repeats_the_content_check(self):
+        data = self.changed_patch('notes.txt', self.FAKE_KEY)
+        with self.assertRaisesRegex(ValueError, 'credential'):
+            publish_changes.validate_patch(self.work, data)
+        self.assertEqual(publish_changes.validate_patch(self.work, self.changed_patch('notes.txt', 'sk-short\n')), ['notes.txt'])
+
     def test_publisher_creates_only_a_generated_branch_and_draft_pr(self):
         data = self.changed_patch()
         with tempfile.TemporaryDirectory() as remote:
@@ -322,7 +348,7 @@ class LaunchBoundary(unittest.TestCase):
                 'RUNNER_TEMP': folder, 'OPENAI_API_KEY': 'test-placeholder',
                 'CODEX_API_KEY': 'unselected-inherited-key'}, clear=True), \
              patch.object(run_agent.subprocess, 'Popen') as popen, redirect_stdout(io.StringIO()):
-            argv, selected, capture = run_agent.codex_command(AgentConfig('codex', {}), 'prompt', str(Path(folder, 'result.md')))
+            argv, selected, capture = run_agent.codex_command(AgentConfig('codex', {}), str(Path(folder, 'result.md')))
             run_agent.launch(argv, selected, folder, capture)
             child = popen.call_args.kwargs['env']
             self.assertEqual(child['CODEX_API_KEY'], 'test-placeholder')
@@ -335,7 +361,7 @@ class LaunchBoundary(unittest.TestCase):
                 'OPENAI_API_KEY': 'unselected-secret', 'CODEX_API_KEY': 'unselected-inherited-key',
                 'CLAUDE_CODE_OAUTH_TOKEN': 'unselected-provider'}, clear=True), \
              patch.object(run_agent.subprocess, 'Popen') as popen, redirect_stdout(io.StringIO()):
-            argv, selected, capture = run_agent.codex_command(AgentConfig('codex', {}), 'prompt', str(Path(folder, 'result.md')))
+            argv, selected, capture = run_agent.codex_command(AgentConfig('codex', {}), str(Path(folder, 'result.md')))
             run_agent.launch(argv, selected, folder, capture)
             child = popen.call_args.kwargs['env']
             for name in ['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_AUTH_JSON', 'CLAUDE_CODE_OAUTH_TOKEN']:
@@ -359,6 +385,22 @@ class LaunchBoundary(unittest.TestCase):
             self.assertEqual(run_agent.run(process, 'stderr'), (124, 'header'))
         self.assertEqual(process.communicate.call_args_list[0].kwargs['timeout'], 1500)
         kill.assert_called_once()
+
+    def test_the_prompt_travels_on_stdin_not_as_one_huge_argument(self):
+        # A single argument over the kernel's per-argument limit fails with E2BIG before launch.
+        prompt = 'x' * 300_000
+        with patch.dict(os.environ, {'OPENAI_API_KEY': 'test-placeholder'}, clear=True), redirect_stdout(io.StringIO()):
+            codex = run_agent.codex_command(AgentConfig('codex', {}), '/tmp/result.md')[0]
+        claude = run_agent.claude_command(AgentConfig('claude', {}))[0]
+        self.assertEqual(codex[-1], '-')
+        self.assertLess(max(len(arg) for arg in claude + codex), 1000)
+        process = subprocess.Popen([sys.executable, '-c', 'import sys; print(len(sys.stdin.read()))'],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        with patch.object(run_agent, 'load_config', return_value=AgentConfig('claude', {})):
+            self.assertEqual(run_agent.run(process, 'stdout', prompt), (0, '300000\n'))
+        with patch.object(run_agent.subprocess, 'Popen') as popen, redirect_stdout(io.StringIO()):
+            run_agent.launch(claude, {}, '/tmp', 'stdout')
+        self.assertEqual(popen.call_args.kwargs['stdin'], subprocess.PIPE)
 
     def test_both_streams_are_captured_without_printing_transcripts(self):
         with patch.object(run_agent.subprocess, 'Popen') as popen, redirect_stdout(io.StringIO()) as output:

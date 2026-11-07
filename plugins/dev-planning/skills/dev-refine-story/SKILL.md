@@ -72,7 +72,7 @@ query($owner: String!, $repo: String!, $endCursor: String) {
     issues(states: OPEN, first: 100, after: $endCursor) {
       totalCount
       pageInfo { hasNextPage endCursor }
-      nodes { number state locked url body }
+      nodes { number state locked url body author { login } }
     }
   }
 }' > "$WORK/open-issues.json"
@@ -86,6 +86,20 @@ jq '[.[].data.repository.issues] as $p | [$p[].nodes[]] as $rows
 - **The lookup is complete only when** the last page reports `hasNextPage: false` and the collected node count equals the `totalCount` every page reports. A non-zero exit, a GraphQL error, a `jq` failure or a count mismatch, such as an issue opened mid-scan, means `lookup.complete: false`, which stops; re-run the query rather than repair it.
 - **Listing, not search.** Search lags behind a create, so "none found" from search can be an issue that exists.
 - **Pass every node through, unfiltered**, as the `candidates` list; `[]` states that a complete listing found no open issue. Do not drop, de-duplicate or repair rows by eye.
+- **Record each marker issue's provenance.** Anyone who can open an issue can copy an origin marker, so for every author of a node whose body begins with `<!-- dev-refine-story:origin`, record the collaborator permission, and set it on every row as `authorPermission` (`null` for a deleted author). A failed lookup stops; re-run it rather than guess:
+
+```bash
+jq -r '.candidates[] | select((.body // "") | startswith("<!-- dev-refine-story:origin")) | .author.login // empty' \
+  "$WORK/lookup.json" | sort -u > "$WORK/marker-authors.txt" && echo '{}' > "$WORK/permissions.json" &&
+while read -r LOGIN; do
+  P=$(gh api "repos/<owner>/<repo>/collaborators/$LOGIN/permission" --jq .permission) || exit 1
+  jq --arg l "$LOGIN" --arg p "$P" '.[$l] = $p' "$WORK/permissions.json" > "$WORK/permissions.next" &&
+    mv "$WORK/permissions.next" "$WORK/permissions.json" || exit 1
+done < "$WORK/marker-authors.txt" &&
+jq --slurpfile p "$WORK/permissions.json" \
+  '.candidates |= map(.authorPermission = (if .author.login then $p[0][.author.login] else null end))' \
+  "$WORK/lookup.json" > "$WORK/lookup.next" && mv "$WORK/lookup.next" "$WORK/lookup.json"
+```
 
 In a sandboxed or worktree-isolated session the host may refuse a long `gh`/`jq` pipeline typed inline; put it in a script under `$WORK` and run that script.
 
@@ -107,7 +121,7 @@ Act on the returned `action` and nothing else:
 | `create` | Only with recorded creation authority, and only through Step 4. |
 | `stop` | Report `reasonCode`, `reason` and every ID in `conflicts`. Make no write. |
 
-With several open marker issues the resolver reuses the newest, the highest number, and lists the rest in `duplicates`. `plannedWrites` is the safety contract: a stop plans zero writes, and no decision plans more than one create or one refinement. Never override a stop by re-running with a friendlier input.
+Only a marker issue whose author has write access is eligible; marker issues by anyone else are listed in `duplicates` and never selected. With two or more eligible marker issues the resolver stops with `DUPLICATE_MARKERS` for a human to decide. `plannedWrites` is the safety contract: a stop plans zero writes, and no decision plans more than one create or one refinement. Never override a stop by re-running with a friendlier input.
 
 ## Step 4 — Create only when no marker issue exists
 
@@ -145,7 +159,7 @@ Immediately before creating, re-run Steps 2 and 3 on a fresh listing. Then:
 
 **One create call per run.** If the create response is lost or uncertain, do not call create again: re-run Steps 2 and 3. A `reuse` of an issue carrying `runMarker` recovers it; record it as `confirmedIssue`. Any other outcome, including another `create`, is a stop for this run: report the receipt and let a human decide. Never delete, close or merge an issue here.
 
-This is supervised idempotency, not a guarantee: GitHub offers no uniqueness transaction, so two creators can still race. The next run then reuses the newer issue and reports the other in `duplicates`.
+This is supervised idempotency, not a guarantee: GitHub offers no uniqueness transaction, so two creators can still race. The next run then stops with `DUPLICATE_MARKERS`, naming both, until a human closes one.
 
 ## Step 5 — Hand off exactly once
 

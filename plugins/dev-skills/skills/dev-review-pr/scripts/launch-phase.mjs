@@ -86,6 +86,8 @@ function launchCommand(request) {
       // `claude -p` starts in the default mode and denies writer edits unless a mode is passed; a plugin cannot rely on the
       // consumer repository's settings to set one.
       ...(request.effort ? ['--effort', request.effort] : []), '--permission-mode', 'acceptEdits', '--no-session-persistence',
+      // The worktree's `.claude/settings*.json` is PR content: its hooks, permissions and environment never load.
+      '--setting-sources', 'user',
       '--output-format', 'json', '--tools', tools, '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}'] }; }
   return { command: 'codex', args: ['exec', '--color', 'never', '-C', request.worktree,
     ...(request.profile ? ['--profile', request.profile] : []), ...(request.model ? ['-m', request.model] : []),

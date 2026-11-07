@@ -10,8 +10,10 @@ Each test cell names a check; "same" repeats the one above.
 |---|---|---|
 | No marker issue: authorized with write access; not authorized; `read`, `triage`, `none` or no permission | `CREATE_AUTHORIZED` `{1, 1}`; `CREATE_NOT_AUTHORIZED`; `INSUFFICIENT_PERMISSION` | *one marker issue is reused, and none creates only with authority and write access* |
 | One open marker issue, also with a trailing `\r` | `REUSE_MARKED` `{0, 1}`, `duplicates: []` | same |
-| Open marker issues `a < b < c`, all six orders | `REUSE_MARKED` of `c`, `duplicates: [a, b]` | *several marker issues reuse the newest in any order* |
-| A locked older duplicate; a closed newer marker issue | not selected | same |
+| Eligible marker issues `a < b < c`, all six orders; two beside unmarked rows; one of them locked | `DUPLICATE_MARKERS`, naming every eligible issue | *several eligible marker issues stop for a human in any order* |
+| A closed newer marker issue | not selected | same |
+| A marker copy whose author has `read`, `triage`, `none` or a deleted account, beside an eligible one or alone | never selected, listed in `duplicates`; alone, a create when authorized | *a marker copied by an author without write access is never selected* |
+| An open marker row without a string or `null` `authorPermission`; a closed or unmarked row without one | `CANDIDATE_PROVENANCE_UNKNOWN`; decided normally | *an open marker issue without fetched provenance stops* |
 | The selected marker issue locked | `ISSUE_LOCKED`, naming it | *a locked selected issue stops* |
 | A title or body mention, the marker on a later line, a marker for `STY_<n>0` or another key, a closed marker issue, a feat tracking issue body | never selected, never blocks a create | *only an open issue with the first-line marker is the Story's* |
 | A first line that opens like this Story's marker but does not parse | `MARKER_UNREADABLE`, naming it; ignored when closed | *a near-miss marker for this Story stops* |

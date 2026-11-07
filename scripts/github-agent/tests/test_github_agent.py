@@ -100,6 +100,24 @@ class TestMentionsInsideCode(unittest.TestCase):
     def test_tilde_fences_too(self):
         self.assertEqual(find_mention("~~~\n@codex fix\n~~~", "@codex"), -1)
 
+    def test_indented_and_unterminated_code_does_not_trigger(self):
+        # A pasted example that is the only mention would otherwise select a write
+        # command that every raw mention agrees with, and so run writable.
+        for text in (
+            "Example from the docs:\n\n    @claude fix the bug\n",
+            "Example:\n\n\t@claude implement it\n",
+            "```\n@claude fix the bug\n",
+            "~~~~\n@claude fix\n~~~\nstill inside the four-tilde fence\n",
+            "- step one\n  ```\n  @claude fix\n  ```\n",
+            "Use ```\n@claude fix\n``` as the example.",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(find_mention(text, "@claude"), -1)
+                self.assertEqual(parse_request(text, "@claude"), ("", ""))
+
+    def test_a_mention_after_a_closed_fence_still_triggers(self):
+        self.assertEqual(parse_request("```\nlog\n```\n@claude review this", "@claude"), ("review", "this"))
+
     def test_a_real_mention_outside_code_still_triggers(self):
         text = "`@codex` is the other one. @claude review this please"
         command, request = parse_request(text, "@claude")

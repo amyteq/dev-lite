@@ -157,10 +157,21 @@ def discussion_context(owner: str, name: str, number: int, comment_limit: int, c
     return blocks
 
 
+def inline_location(context: dict, char_limit: int) -> list[str]:
+    """Where an inline review comment sits: path, line and a bounded diff hunk, quoted as data."""
+    inline = context.get("inline") or {}
+    if not inline.get("path"):
+        return []
+    hunk = truncate(inline.get("diff_hunk") or "(no diff hunk)", char_limit)
+    return [f"### Inline review comment location\nFile: `{inline['path']}`, line {inline.get('line') or 'unknown'}"
+            f"\n\nDiff hunk:\n~~~~diff\n{hunk}\n~~~~"]
+
+
 def gather_context(context: dict, comment_limit: int, char_limit: int) -> str:
     repo = context["repo"]
     number = int(context["number"])
     surface = context["surface"]
+    location = inline_location(context, char_limit)
     try:
         if surface == "discussion":
             blocks = discussion_context(
@@ -172,8 +183,8 @@ def gather_context(context: dict, comment_limit: int, char_limit: int) -> str:
                 blocks += pull_request_context(repo, number, char_limit)
     except Exception as error:  # noqa: BLE001 - context is a nice-to-have
         warn(f"could not gather thread context: {error}")
-        return "(thread context unavailable; report this limitation if it prevents a reliable answer)"
-    return "\n\n".join(blocks)
+        blocks = ["(thread context unavailable; report this limitation if it prevents a reliable answer)"]
+    return "\n\n".join(location + blocks)
 
 
 def working_tree_notes(context: dict) -> str:
@@ -223,6 +234,8 @@ def build(context: dict, thread: str, rules: str = "", rules_file: str = "") -> 
         if rules.strip() else ""
     )
     protected = ", ".join(f"`{name}`" for name in context.get("protected_branches") or [context["default_branch"]])
+    location_note = ("\n- location: an inline review comment; its file, line and diff hunk open the thread context"
+                     if (context.get("inline") or {}).get("path") else "")
     return f"""You are the `{context['mention']}` agent for the GitHub repository `{context['repo']}`.
 A collaborator with write access mentioned you. Everything below is your operating brief.
 
@@ -230,7 +243,7 @@ A collaborator with write access mentioned you. Everything below is your operati
 - surface: {context['surface']} #{context['number']}
 - requested by: @{context['actor']}
 - command: {command or '(none)'}
-- source: {context['source_url'] or '(manual run)'}
+- source: {context['source_url'] or '(manual run)'}{location_note}
 
 <request>
 {context['request'] or '(no text beyond the mention)'}

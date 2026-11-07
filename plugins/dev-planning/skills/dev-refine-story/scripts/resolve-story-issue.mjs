@@ -3,8 +3,9 @@
 // filesystem, no clock. SKILL.md collects the evidence and acts on the returned decision.
 //
 // A Story's issue is an open issue whose body's first line is this skill's origin marker for the
-// Story. Nothing else selects an issue or blocks a create, and every absent or unreadable input
-// stops instead of defaulting. See references/resolver-contract.md.
+// Story and whose author holds write access, since anyone who can open an issue can copy a marker.
+// Nothing else selects an issue or blocks a create, and every absent or unreadable input stops
+// instead of defaulting. See references/resolver-contract.md.
 //
 // CLI:  node resolve-story-issue.mjs <input.json>   (or `-` for stdin)
 // Exit: 0 for reuse/create, 3 for stop, 2 for malformed input.
@@ -181,7 +182,8 @@ function readRows(candidates, repoKey, key) {
     const hit = [...new Set(candidates.filter(applies).map((c) => c.number))];
     if (hit.length) return { stop: [reasonCode, reason(hit), hit] };
   }
-  const issues = candidates.map((c) => ({ number: c.number, url: c.url.trim(), open: normalizeState(c.state) === 'open', locked: c.locked, marker: markerOf(c.body, key) }));
+  const issues = candidates.map((c) => ({ number: c.number, url: c.url.trim(), open: normalizeState(c.state) === 'open', locked: c.locked,
+    marker: markerOf(c.body, key), author: c.authorPermission }));
   const unreadable = issues.filter((c) => c.open && c.marker === 'unreadable').map((c) => c.number);
   if (unreadable.length) {
     return {
@@ -192,22 +194,37 @@ function readRows(candidates, repoKey, key) {
       ],
     };
   }
+  // Provenance is read only where it decides something: an open row carrying this Story's marker.
+  const unproven = issues.filter((c) => c.open && c.marker === 'marked' && !(c.author === null || typeof c.author === 'string'));
+  if (unproven.length) {
+    return {
+      stop: ['CANDIDATE_PROVENANCE_UNKNOWN', `The author permission of marker issue ${ids(unproven.map((c) => c.number))} was not fetched; pass \`authorPermission\` (\`null\` for a deleted author).`,
+        unproven.map((c) => c.number)],
+    };
+  }
   return { issues };
 }
 
-// The Story's issues are its open marker issues. With several, the newest — the highest number —
-// is the resolution and the rest are reported, never closed.
+const trusted = (c) => typeof c.author === 'string' && CREATE_PERMISSIONS.has(c.author.trim().toLowerCase());
+
+// The Story's issue is its one open marker issue by an author with write access. Marker issues by
+// anyone else are reported as `duplicates`, never selected; two or more eligible ones stop for a human.
 function decide(input, key, issues) {
   const marked = issues.filter((c) => c.open && c.marker === 'marked').sort((a, b) => a.number - b.number);
-  if (marked.length) {
-    const hit = marked[marked.length - 1];
-    const duplicates = marked.slice(0, -1).map((c) => c.number);
+  const eligible = marked.filter(trusted);
+  const duplicates = marked.filter((c) => !trusted(c)).map((c) => c.number);
+  const copies = duplicates.length ? `; ${ids(duplicates)} also carry the marker but were opened without write access, so they are reported for a human` : '';
+  if (eligible.length > 1) {
+    return STOP('DUPLICATE_MARKERS', `${ids(eligible.map((c) => c.number))} all carry ${key}'s origin marker and were opened with write access; a human must decide which is the Story's issue.`,
+      eligible.map((c) => c.number));
+  }
+  if (eligible.length) {
+    const [hit] = eligible;
     if (hit.locked) return STOP('ISSUE_LOCKED', `${key}'s issue #${hit.number} is locked; no write is attempted and no replacement is created.`, [hit.number]);
-    const also = duplicates.length ? `; ${ids(duplicates)} also carry the marker and are reported as duplicates for a human` : '';
     return {
       action: 'reuse',
       reasonCode: 'REUSE_MARKED',
-      reason: `Reusing #${hit.number}, the ${duplicates.length ? 'newest' : 'only'} open issue whose first line is ${key}'s origin marker${also}.`,
+      reason: `Reusing #${hit.number}, the only open issue whose first line is ${key}'s origin marker and whose author has write access${copies}.`,
       issue: { number: hit.number, url: hit.url },
       selected: hit.number,
       duplicates,
@@ -216,7 +233,7 @@ function decide(input, key, issues) {
     };
   }
   if (input?.authority?.createAuthorized !== true) {
-    return STOP('CREATE_NOT_AUTHORIZED', `No open issue carries ${key}'s origin marker and this run holds no explicit creation authority.`);
+    return STOP('CREATE_NOT_AUTHORIZED', `No open issue by an author with write access carries ${key}'s origin marker and this run holds no explicit creation authority.`);
   }
   const rawPermission = input?.authority?.effectivePermission;
   const permission = typeof rawPermission === 'string' ? rawPermission.trim().toLowerCase() || null : null;
@@ -229,10 +246,10 @@ function decide(input, key, issues) {
   return {
     action: 'create',
     reasonCode: 'CREATE_AUTHORIZED',
-    reason: `No open issue carries ${key}'s origin marker after a complete lookup, and creation is explicitly authorized; write the marker as the new issue's first body line.`,
+    reason: `No open issue by an author with write access carries ${key}'s origin marker after a complete lookup, and creation is explicitly authorized; write the marker as the new issue's first body line${copies}.`,
     issue: null,
     selected: null,
-    duplicates: [],
+    duplicates,
     conflicts: [],
     plannedWrites: { createIssue: 1, invokeRefineIssue: 1 },
   };

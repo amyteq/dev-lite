@@ -23,6 +23,7 @@ Exit `1` is a near miss such as `--no-publish` or `dry_run`: stop before analysi
 | Issue target that is not a feat tracking issue, or a discussion target; no token; verdict `proposal_complete` or `proposal_blocked`; `locked: false`; complete scan; `select` returns `post`; both checks exit `0` | Post one comment, on an open or closed issue, or on any discussion |
 | `no-publish`, or a local pack path | No remote write |
 | `dry-run` | No remote write; §5's checks run, and `$S/summary.md` and its post command stay in scratch |
+| The model selected this skill on its own, without the invoking human's explicit request for it | No remote write unless the invoker answers yes to [result-comment.md §4](result-comment.md#4-the-ask-when-the-invocation-forbids-github-changes)'s ask; until then, as `dry-run` |
 | A PR, another repository, or a number that names a PR | Stop before analysis |
 | Verdict `analysis_stopped`, or a locked issue or discussion | No remote write; the report says why |
 | Incomplete scan, `select` other than `post`, or a check exiting `1` or `2` | No post until a corrected payload passes |

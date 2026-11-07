@@ -40,11 +40,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from agent_lib import load_config, load_context, log, warn  # noqa: E402
 
 
-def claude_command(config, prompt: str) -> tuple[list[str], dict[str, str], str]:
+# Both CLIs read the prompt from stdin: a long thread as one argument exceeds the
+# kernel's per-argument limit (E2BIG) before the CLI starts.
+def claude_command(config) -> tuple[list[str], dict[str, str], str]:
     argv = [
         "claude",
         "-p",
-        prompt,
         "--output-format",
         "json",
         "--max-turns",
@@ -67,7 +68,7 @@ def claude_command(config, prompt: str) -> tuple[list[str], dict[str, str], str]
     return argv, {}, "stdout"
 
 
-def codex_command(config, prompt: str, result_file: str) -> tuple[list[str], dict[str, str], str]:
+def codex_command(config, result_file: str) -> tuple[list[str], dict[str, str], str]:
     home = Path(tempfile.mkdtemp(prefix="agent-codex-", dir=os.environ.get("RUNNER_TEMP")))
     home.chmod(0o700)
     env: dict[str, str] = {"CODEX_HOME": str(home)}
@@ -111,7 +112,7 @@ def codex_command(config, prompt: str, result_file: str) -> tuple[list[str], dic
     effort = config.get("EFFORT")
     if effort:
         argv.extend(["-c", f"model_reasoning_effort={effort}"])
-    argv.append(prompt)
+    argv.append("-")  # read the prompt from stdin
     # `--output-last-message` already writes the reply; stdout is the final message
     # and stderr the transcript, which opens with the session header we read.
     return argv, env, "stderr"
@@ -145,6 +146,7 @@ def launch(argv: list[str], env: dict[str, str], cwd: str, capture: str) -> subp
         argv,
         cwd=cwd,
         env=environment,
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         start_new_session=True,
@@ -153,12 +155,12 @@ def launch(argv: list[str], env: dict[str, str], cwd: str, capture: str) -> subp
     )
 
 
-def run(process: subprocess.Popen, capture: str) -> tuple[int, str]:
-    """Capture CLI output privately; kill the process group before the job deadline."""
+def run(process: subprocess.Popen, capture: str, prompt: str = "") -> tuple[int, str]:
+    """Send the prompt on stdin, capture CLI output privately, and kill the process group before the job deadline."""
     config = load_config()
     timeout = min(25, max(1, config.number("TIMEOUT_MINUTES"))) * 60
     try:
-        stdout, stderr = process.communicate(timeout=timeout)
+        stdout, stderr = process.communicate(input=prompt, timeout=timeout)
         code = process.returncode
     except subprocess.TimeoutExpired:
         os.killpg(process.pid, signal.SIGTERM)
@@ -251,9 +253,9 @@ def main() -> int:
     env = {}
     try:
         if config.agent == "claude":
-            argv, env, capture = claude_command(config, prompt)
+            argv, env, capture = claude_command(config)
         else:
-            argv, env, capture = codex_command(config, prompt, result_file)
+            argv, env, capture = codex_command(config, result_file)
         if not context.get("writable"):
             if config.agent == "claude":
                 argv.extend(["--tools", "Read,Glob,Grep", "--permission-mode", "dontAsk"])
@@ -272,7 +274,7 @@ def main() -> int:
         status["started"] = started_stamp()
         write_status(status)
         began = time.monotonic()
-        code, captured = run(process, capture)
+        code, captured = run(process, capture, prompt)
         status["elapsed"] = elapsed_stamp(time.monotonic() - began)
         if config.agent == "claude":
             message, observed = claude_observed(captured, config)

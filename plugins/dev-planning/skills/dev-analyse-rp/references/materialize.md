@@ -18,17 +18,22 @@ Never materialize a part of a packet, and never edit the packet to make a precon
 
 ## 2. Branch and rebuild the index
 
-Branch from the base branch's latest commit, named `docs/<short-slug>` after the programme boundary, and build the index there. `BASE` is the integration branch the repository's `AGENTS.md` names (for example `develop`), otherwise the default branch (`gh repo view --json defaultBranchRef --jq .defaultBranchRef.name`):
+Branch from the base branch's latest commit, named `docs/<short-slug>` after the programme boundary, in a new worktree under scratch, never in the current checkout, so its staged or uncommitted work cannot reach the PR. Build the index there. `BASE` is the integration branch the repository's `AGENTS.md` names (for example `develop`), otherwise the default branch (`gh repo view --json defaultBranchRef --jq .defaultBranchRef.name`). Every later git, index and `gh pr create` command of this materialize step runs in `$S/wt`; remove it with `git worktree remove $S/wt` after the report:
 
 ```bash
-git fetch origin BASE && git switch -c docs/SLUG origin/BASE &&
+git fetch origin BASE && git worktree add -b docs/SLUG $S/wt origin/BASE && cd $S/wt &&
+test -z "$(git status --porcelain)" &&
 node "${CLAUDE_SKILL_DIR}/planning-index.mjs" build --out $S/materialize-index.json
 ```
 
-If its digest differs from `baseline.planning_index.digest`, the planning docs moved since the analysis: stop and re-run the analysis. The index sees committed docs only, so also list open PRs that add feat or story docs:
+If its digest differs from `baseline.planning_index.digest`, the planning docs moved since the analysis: stop and re-run the analysis. The digest covers every feat and story doc's full text, so a body-only change to a feat's scope or a story's acceptance criteria stops too. The index sees committed docs only, so also list every open PR's feat or story doc paths. Both listings paginate to the end, because `gh pr list` stops at 30 PRs and a PR's file list at 100 paths by default; any failure stops:
 
 ```bash
-gh pr list --state open --json number,files --jq '.[] | select(any(.files[]; .path | test("^docs/(feats|stories)/(FT|STY)_"))) | {number, paths: [.files[].path | select(test("^docs/(feats|stories)/"))]}'
+gh api --paginate 'repos/OWNER/REPO/pulls?state=open&per_page=100' --jq '.[].number' > $S/open-prs.txt &&
+while read -r N; do
+  gh api --paginate "repos/OWNER/REPO/pulls/$N/files?per_page=100" \
+    --jq ".[] | select(.filename | test(\"^docs/(feats|stories)/(FT|STY)_\")) | \"$N \(.filename)\"" || exit 1
+done < $S/open-prs.txt > $S/open-pr-docs.txt
 ```
 
 ## 3. Allocate numbers
@@ -38,7 +43,7 @@ node "${CLAUDE_SKILL_DIR}/planning-index.mjs" next $S/materialize-index.json fea
 node "${CLAUDE_SKILL_DIR}/planning-index.mjs" next $S/materialize-index.json story S
 ```
 
-`F` is the number of approved new feats and `S` the number of new stories. `next` starts past every number the index holds, retired and superseded ones included, and never below 101; it never fills a gap. If an open PR from §2 adds a doc numbered at or above the first number `next` printed, start past that PR's highest number instead. Allocate in packet order: new feats in the order the packet names them, new stories in unit order.
+`F` is the number of approved new feats and `S` the number of new stories. `next` starts past every number the index holds, retired and superseded ones included, and never below 101; it never fills a gap. Check each prefix separately against `$S/open-pr-docs.txt`: if an open PR adds an `FT_` doc numbered at or above the first `FT_` number `next` printed, start the feats past the highest `FT_` number any open PR adds, and likewise for `STY_` and the stories. Allocate in packet order: new feats in the order the packet names them, new stories in unit order.
 
 ## 4. Write the docs
 
@@ -58,8 +63,13 @@ Docs carry no readiness, progress, dependency map or open decision: those belong
 
 Commit, then rebuild the index from the branch; it must exit `0` and count exactly the new docs:
 
+Stage only the exact paths this packet owns — each new or changed doc, `docs/feats/README.md`, `docs/stories/README.md` and `.github/labels.yml` — listed one per line in `$S/owned.txt`, and require the staged set to equal that list before committing:
+
 ```bash
-git add docs/feats docs/stories .github/labels.yml && git commit -m "docs: plan FT_<n> ... from #N" &&
+xargs -d '\n' git add -- < $S/owned.txt &&
+test "$(git diff --cached --name-only | sort)" = "$(sort -u $S/owned.txt)" &&
+test -z "$(git status --porcelain --untracked-files=all | grep -v '^[AM] ')" &&
+git commit -m "docs: plan FT_<n> ... from #N" &&
 node "${CLAUDE_SKILL_DIR}/planning-index.mjs" build --out $S/materialized-index.json
 ```
 
@@ -89,7 +99,7 @@ Only after the PR exists, for each new feat in order:
    - **Open decisions** — each `needed` decision with its question, owner or "unassigned", and the stories it blocks;
    - **Batches / waves** — the checker's feasible parallel batches, by story;
    - **Links** — the FT doc on the PR branch, the PR, and the request pack.
-3. **Write back.** Set the FT doc's `tracking_issue` and its README `## Index` cell to the issue number, commit on the same branch, rebuild the index (exit `0`) and push. A second push to the PR branch is a normal push, never a force-push.
+3. **Write back.** In `$S/wt`, set the FT doc's `tracking_issue` and its README `## Index` cell to the issue number, stage exactly those two paths, commit on the same branch, rebuild the index (exit `0`) and push. A second push to the PR branch is a normal push, never a force-push.
 
 Read each issue back and confirm its labels are exactly `feat` and the feat label.
 

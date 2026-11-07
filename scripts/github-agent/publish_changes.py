@@ -33,6 +33,24 @@ def checked_path(path: str) -> None:
         raise ValueError(f'Private or invalid patch path: {path!r}')
 
 
+# High-confidence credential values in added patch lines: private keys, GitHub
+# tokens, Anthropic/OpenAI keys and the token fields of an OAuth auth.json.
+# shortcut: binary hunks are base85 and not scanned; the path policy covers key files.
+CREDENTIAL_CONTENT = re.compile(
+    rb"-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    rb"|\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}\b|\bgithub_pat_[A-Za-z0-9_]{60,}"
+    rb"|\bsk-(?:ant-|proj-)[A-Za-z0-9_-]{20,}"
+    rb"|\"(?:refresh_token|access_token|id_token)\"\s*:\s*\"[^\"]{20,}\""
+)
+
+
+def check_patch_content(patch: bytes) -> None:
+    """Refuse a patch whose added lines carry a credential value."""
+    for line in patch.splitlines():
+        if line.startswith(b'+') and not line.startswith(b'+++') and CREDENTIAL_CONTENT.search(line):
+            raise ValueError('Patch adds a credential-shaped value')
+
+
 def git(work: str, *args: str, input: bytes | None = None, index_file: str | None = None) -> bytes:
     env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
     env['GIT_CONFIG_NOSYSTEM'] = '1'
@@ -71,6 +89,7 @@ def validate_patch(work: str, patch: bytes) -> list[str]:
         raise ValueError('Patch exceeds the 2 MB publication limit')
     if not patch:
         return []
+    check_patch_content(patch)
     # --numstat -z decodes Git's quoted path representation correctly.
     records = git(work, 'apply', '--numstat', '-z', '-', input=patch).split(b'\0')
     paths = []

@@ -10,9 +10,11 @@ export const TYPES = ['OD', 'SD', 'ALL'];
 export const DEFAULTS = { type: 'OD', lang: 'en' };
 const ENV = { type: 'DEV_EXPLAIN_TYPE', lang: 'DEV_EXPLAIN_LANG' };
 
-// Protected workflow and decision labels are outside an explanation run’s write boundary.
+// Protected workflow and decision labels are outside an explanation run’s write boundary. The planning
+// work model's readiness labels, and any transition labels the caller declares, are refused both ways.
 const EXCLUDED_ADD = ['ai:ready', 'ai:implementing', 'decision:confirmed'];
 const EXCLUDED_REMOVE = ['ai:blocked', 'decision:needed'];
+const EXCLUDED_BOTH = ['ready', 'blocked'];
 
 const REPO_NAME = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 // A bare number may name an issue, PR or discussion; a URL's path fixes the kind. A discussions URL's
@@ -155,13 +157,14 @@ export function resolveArgs({ repo, text, typeEnv, langEnv, candidates }) {
 }
 
 /** Split a planned label change into what may be applied and what is refused, with reasons. */
-export function vetLabels({ live, current, add, remove }) {
+export function vetLabels({ live, current, add, remove, protected: declared = [] }) {
+  const always = [...EXCLUDED_BOTH, ...declared.map((name) => name.toLowerCase())];
   const byKey = new Map(live.map((name) => [name.toLowerCase(), name]));
   const has = new Set(current.map((name) => name.toLowerCase()));
   const apply = { add: [], remove: [] };
   const refused = [];
   const both = new Set(add.map((n) => n.toLowerCase()).filter((n) => remove.some((r) => r.toLowerCase() === n)));
-  for (const [change, names, excluded] of [['add', add, EXCLUDED_ADD], ['remove', remove, EXCLUDED_REMOVE]]) {
+  for (const [change, names, excluded] of [['add', add, [...EXCLUDED_ADD, ...always]], ['remove', remove, [...EXCLUDED_REMOVE, ...always]]]) {
     for (const name of names) {
       const key = name.toLowerCase();
       if (both.has(key)) refused.push({ label: name, change, reason: 'both added and removed' });
@@ -216,6 +219,7 @@ const SCHEMAS = {
     current: [isStrings, 'an array of strings'],
     add: [isStrings, 'an array of strings'],
     remove: [isStrings, 'an array of strings'],
+    protected: [isStrings, 'an array of strings', 'optional'],
   },
 };
 const COMMANDS = { args: ['input'], labels: ['input'], append: ['before', 'addition', 'out'], verify: ['before', 'planned', 'after'] };
@@ -237,7 +241,8 @@ function bodyOf(text, flag) {
 function exactObject(value, schema) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) fail('--input must hold a JSON object');
   for (const key of Object.keys(value)) if (!Object.hasOwn(schema, key)) fail(`input has the unknown key "${key}"`);
-  for (const [key, [valid, expected]] of Object.entries(schema)) {
+  for (const [key, [valid, expected, optional]] of Object.entries(schema)) {
+    if (optional && !Object.hasOwn(value, key)) continue;
     if (!Object.hasOwn(value, key) || !valid(value[key])) fail(`input.${key} must be ${expected}`);
   }
   return value;

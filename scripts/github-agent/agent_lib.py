@@ -143,8 +143,9 @@ CONFIG_PREFIXES = tuple(f"{agent.upper()}_ACTION_" for agent in AGENTS)
 def load_config(agent: str | None = None, variables: dict[str, str] | None = None) -> AgentConfig:
     """Read the configuration the workflow placed in the environment.
 
-    The workflow passes each configuration variable by name. It deliberately does
-    NOT hand us the whole `vars` context: GitHub Actions echoes a job's `env:`
+    The workflow passes each configuration variable by name, to the routing step
+    only; every later step reads the copy routing recorded in EVENT_FILE. It
+    deliberately does NOT hand us the whole `vars` context: GitHub Actions echoes a job's `env:`
     block into the log of every step, and repository variables are not encrypted,
     so dumping all of them would print anything mis-filed there — a credential
     included — into the run log. Only the names the workflow lists get here.
@@ -156,6 +157,10 @@ def load_config(agent: str | None = None, variables: dict[str, str] | None = Non
             for name, value in os.environ.items()
             if name.startswith(CONFIG_PREFIXES)
         }
+    if not variables and os.path.isfile(os.environ.get("EVENT_FILE", "")):
+        # Only the routing step receives the variables; it validates them and
+        # records them in the request, so no later step renders them in its log.
+        variables = load_context().get("config") or {}
     return AgentConfig(agent=agent, variables=variables)
 
 
@@ -299,7 +304,14 @@ def sanitize_mentions(text: str) -> str:
     return text
 
 
-_FENCED_CODE = re.compile(r"```.*?```|~~~.*?~~~", re.DOTALL)
+# A fence opens on a line indented at most three spaces and runs to a closing fence
+# of the same character at least as long, or to the end of the text when unclosed.
+_FENCED_CODE = re.compile(r"^ {0,3}(`{3,}|~{3,}).*?(?:^ {0,3}\1[`~]*[ \t]*$|\Z)", re.DOTALL | re.MULTILINE)
+# Backtick or tilde runs paired anywhere, such as a multi-line inline code span.
+_PAIRED_FENCES = re.compile(r"```.*?```|~~~.*?~~~", re.DOTALL)
+# shortcut: any line indented four or more columns is treated as an indented code
+# block, even a list continuation; a mention there is ignored rather than obeyed.
+_INDENTED_CODE = re.compile(r"^(?: {4}| {0,3}\t).*$", re.MULTILINE)
 _INLINE_CODE = re.compile(r"(`+)[^\n]*?\1")
 
 
@@ -309,14 +321,21 @@ def _blank(match: re.Match[str]) -> str:
 
 
 def mask_code(text: str) -> str:
-    """Blank out fenced and inline code, preserving character offsets.
+    """Blank out fenced, indented and inline code, preserving character offsets.
 
     Backticks are how you talk *about* an agent without summoning it — which is
     what documentation, and this repository's own pull requests about these
     workflows, have to do.
     """
-    text = _FENCED_CODE.sub(_blank, text or "")
-    return _INLINE_CODE.sub(_blank, text)
+    # Each block rule reads the original text and their spans are united, so a
+    # span one rule misreads is still covered by another; over-masking only ignores.
+    chars = list(text or "")
+    for pattern in (_FENCED_CODE, _PAIRED_FENCES, _INDENTED_CODE):
+        for match in pattern.finditer(text or ""):
+            for index in range(*match.span()):
+                if chars[index] != "\n":
+                    chars[index] = " "
+    return _INLINE_CODE.sub(_blank, "".join(chars))
 
 
 def _mention_pattern(mention: str) -> re.Pattern[str]:

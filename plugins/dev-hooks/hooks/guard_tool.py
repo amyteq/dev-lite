@@ -74,7 +74,8 @@ PROTECTED_NAMES = {
 def path_is_protected(path: str) -> bool:
     """System credentials and production/test env files. Local dev `.env` stays readable."""
     p = "/" + normalize_path(path)  # leading slash so relative `secrets/x` matches `/secrets/`
-    return Path(p).name in PROTECTED_NAMES or any(fragment in p for fragment in PROTECTED_FRAGMENTS)
+    # A trailing slash lets a protected directory itself (`~/.aws`) match its `/.aws/` fragment.
+    return Path(p).name in PROTECTED_NAMES or any(fragment in p + "/" for fragment in PROTECTED_FRAGMENTS)
 
 
 def compact(command: str) -> str:
@@ -126,8 +127,19 @@ def mentions_interpreter(command: str) -> bool:
     return any(Path(match.group("program")).name in INTERPRETERS for match in COMMAND_POSITION.finditer(command))
 
 
+# Programs that only store or forward what they read on stdin. A heredoc fed to
+# anything else (psql, ssh, docker exec, ...) may be executed, so it stays in scope.
+DATA_SINKS = {"cat", "tee", "gh", "git"}
+EXPANDABLE = re.compile(r"[$`\\]")
+
+
 def strip_heredoc_bodies(command: str) -> str:
-    """Drop heredoc payloads unless something in the command line would execute them."""
+    """Drop heredoc payloads that are verified literal data written by a data sink.
+
+    A body stays in scope when anything in the command line could execute it, when
+    its consumer is not a data sink, or when an unquoted delimiter lets the shell
+    expand `$(...)`, backticks or variables inside it.
+    """
     if "<<" not in command or mentions_interpreter(command):
         return command
 
@@ -142,8 +154,16 @@ def strip_heredoc_bodies(command: str) -> str:
         if not opener:
             continue
         tag = opener.group("tag")
-        while index < len(lines) and lines[index].strip() != tag:
-            index += 1
+        end = index
+        while end < len(lines) and lines[end].strip() != tag:
+            end += 1
+        body = lines[index:end]
+        programs = list(COMMAND_POSITION.finditer(line[: opener.start()]))
+        sink = bool(programs) and Path(programs[-1].group("program")).name in DATA_SINKS
+        literal = bool(opener.group("quote")) or not EXPANDABLE.search("\n".join(body))
+        if not (sink and literal):
+            kept.extend(body)
+        index = end
         if index < len(lines):
             kept.append(lines[index])
             index += 1
@@ -160,19 +180,39 @@ def normalize_command(command: str) -> str:
 
 # `rm` arguments up to the next separator; matched on the lower-cased command.
 RM_ARGS = re.compile(r"\brm\b([^|;&\n]*)")
-TEMP_ROOTS = ("/tmp/", "$tmpdir/", "${tmpdir}/", '"$tmpdir"/', '"${tmpdir}"/', '"$tmpdir/', '"${tmpdir}/')
+# `$TMPDIR/`, `${TMPDIR}/`, `"$TMPDIR"/` or `"$TMPDIR/` (lower-cased).
+TMPDIR_PREFIX = re.compile(r'^"?\$(?:tmpdir|\{tmpdir\})"?/')
+
+
+def temp_roots() -> list[str]:
+    """/tmp, plus $TMPDIR only when it is set to an absolute path other than `/`."""
+    tmpdir = os.path.normpath(os.environ.get("TMPDIR") or ".")
+    return ["/tmp"] + ([tmpdir.lower()] if os.path.isabs(tmpdir) and tmpdir != "/" else [])
 
 
 def rm_targets_only_temp(lc: str) -> bool:
-    """True when every `rm` in the command removes only paths under /tmp or $TMPDIR."""
+    """True when every `rm` in the command removes only paths strictly inside /tmp or $TMPDIR."""
+    roots = temp_roots()
     for args in RM_ARGS.findall(lc):
         targets = [token for token in args.split() if not token.startswith("-")]
-        if not targets or any(not t.startswith(TEMP_ROOTS) or ".." in t for t in targets):
+        if not targets:
             return False
+        for target in targets:
+            prefix = TMPDIR_PREFIX.match(target)
+            if prefix and len(roots) < 2:
+                return False  # an empty or unusable $TMPDIR expands to a path under `/`
+            path = (roots[-1] + "/" + target[prefix.end():] if prefix else target).replace('"', "").rstrip("/")
+            if ".." in target or not any(path.startswith(root + "/") for root in (roots[-1:] if prefix else roots)):
+                return False
     return True
 
 
-SECRET_PATHS = r"id_rsa|id_ed25519|\.aws|\.ssh|\.config/gcloud|secrets/|hosts\.yml|\.netrc|\.env\.production"
+# The shell rules use the file tools' policy: a fragment matches from a path boundary
+# (a directory fragment also as the directory itself), a name only as a whole path part.
+SECRET_PATHS = r"(?<![\w.-])(?:" + "|".join(
+    [re.escape(f.strip("/")) + (r"(?:/|(?![\w.-]))" if f.endswith("/") else "") for f in PROTECTED_FRAGMENTS]
+    + [re.escape(name) + r"(?![\w.-])" for name in sorted(PROTECTED_NAMES)]
+) + ")"
 
 DENY_PATTERNS = [
     (r"\bsudo\b", "Refusing sudo from the agent."),
@@ -185,10 +225,11 @@ DENY_PATTERNS = [
     (r"\bdd\s+.*\bof=/dev/", "Refusing raw disk write."),
     (r"\bmkfs(\.|\s|$)", "Refusing filesystem formatting command."),
     (r"\bshutdown\b|\breboot\b|\bhalt\b", "Refusing host power command."),
-    # The flag is legal anywhere in the push: `git push origin main --force`.
-    (r"\bgit\s+push\b[^|;&]*?\s(-f|--force|--force-with-lease)\b", "Refusing force push."),
+    # The flag is legal anywhere in the push: `git push origin main --force`. A `+`
+    # refspec and a bundled short option (`-uf`) force the same update.
+    (r"\bgit\s+push\b[^|;&]*?\s(-[a-z0-9]*f[a-z0-9]*|--force|--force-with-lease|--mirror|\+\S)", "Refusing force push."),
     (
-        r"\bgit\s+push\b[^|;&]*?(--delete\b|\s:\S)",
+        r"\bgit\s+push\b[^|;&]*?\s(-[a-z0-9]*d[a-z0-9]*\b|--delete\b|--prune\b|:\S)",
         "Refusing remote branch deletion (preserve published branch history).",
     ),
     (r"\bgit\s+filter-(branch|repo)\b", "Refusing history rewrite."),

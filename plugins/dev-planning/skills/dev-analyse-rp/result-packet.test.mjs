@@ -186,7 +186,7 @@ const proposal = {
   baseline: { commit: BASE_SHA, planning_index: { digest: DIGEST } },
   units: [{ id: 'U-1', write_boundary: ['docs/notes/a.md', 'src/*.ts'] }, { id: 'U-2', write_boundary: ['tests/**', 'package.json'] }],
   edges: [{ from: 'U-2', to: 'U-1', conflict_path: 'package.json' }, { from: 'U-1', to: 'STY_109', conflict_path: null }],
-  sources: [{ id: 'SRC-1', origin: 'docs/spec.md' }, { id: 'SRC-2', origin: 'https://github.com/acme/tools/issues/1' }],
+  sources: [{ id: 'SRC-1', origin: 'docs/spec.md' }, { id: 'SRC-2', origin: 'https://github.com/example-org/example-repo/issues/1' }],
 };
 const drift = (changed, headDigest = DIGEST) => delta({ proposal, head: 'c'.repeat(40), changed, baselineFiles: ['docs/spec.md'], headDigest });
 
@@ -205,7 +205,7 @@ check('overlap lists each cited path: exact, *, **, conflict path and source ori
 });
 
 check('a source origin that carries a #section anchor still matches its file at the baseline', () => {
-  const anchored = { ...proposal, sources: [{ id: 'SRC-3', origin: 'docs/spec.md#6' }, { id: 'SRC-4', origin: 'https://github.com/acme/tools/issues/1#issuecomment-1' }] };
+  const anchored = { ...proposal, sources: [{ id: 'SRC-3', origin: 'docs/spec.md#6' }, { id: 'SRC-4', origin: 'https://github.com/example-org/example-repo/issues/1#issuecomment-1' }] };
   const r = delta({ proposal: anchored, head: 'c'.repeat(40), changed: ['docs/spec.md'], baselineFiles: ['docs/spec.md'], headDigest: DIGEST });
   assert.deepStrictEqual(r.overlap, [{ path: 'docs/spec.md', citedBy: ['SRC-3'] }]);
 });

@@ -287,6 +287,19 @@ test('AC-5.5 protected workflow and decision transitions and unknown labels are 
   assert.equal(result.refused[4].reason, 'both added and removed');
 });
 
+test('readiness labels and caller-declared transition labels are refused in both directions', () => {
+  const live = ['ready', 'blocked', 'Status: Approved', 'area:skills'];
+  const result = vetLabels({ live, current: ['blocked', 'Status: Approved'], add: ['Ready', 'area:skills'],
+    remove: ['BLOCKED', 'status: approved'], protected: ['Status: Approved'] });
+  assert.deepEqual(result.apply, { add: ['area:skills'], remove: [] });
+  assert.deepEqual(result.refused.map(({ label, change }) => `${change} ${label}`),
+    ['add Ready', 'remove BLOCKED', 'remove status: approved']);
+  for (const entry of result.refused) assert.match(entry.reason, /protected workflow or decision transition/);
+  const reverse = vetLabels({ live, current: ['ready'], add: ['blocked'], remove: ['ready'] });
+  assert.deepEqual(reverse.apply, { add: [], remove: [] });
+  assert.equal(reverse.refused.length, 2);
+});
+
 test('label removals emit the live name and its URI-encoded path segment', () => {
   const result = vetLabels({
     live: ['needs triage', 'bug/#?%', "owner's choice"],
@@ -317,6 +330,8 @@ test('the CLI exits 0, 1 or 2 and never treats a malformed input as a pass', () 
   assert.equal(cli('args', '--input', input({ repo: REPO, text: '', typeEnv: '', langEnv: '', candidates: [] })).status, 1);
   assert.equal(cli('labels', '--input', input({ live: ['a'], current: [], add: ['ai:ready'], remove: [] })).status, 1);
   assert.equal(cli('labels', '--input', input({ live: ['a'], current: [], add: ['a'], remove: [] })).status, 0);
+  assert.equal(cli('labels', '--input', input({ live: ['a', 'b'], current: [], add: ['b'], remove: [], protected: ['b'] })).status, 1);
+  assert.equal(cli('labels', '--input', input({ live: ['a'], current: [], add: ['a'], remove: [], protected: 'a' })).status, 2);
   assert.equal(cli('args', '--input', input({ repo: REPO, text: '' })).status, 2);
   assert.equal(cli('args', '--input', input({ repo: REPO, text: '', typeEnv: '', langEnv: '', candidates: [], extra: 1 })).status, 2);
   assert.equal(cli('args', '--input', file('bad.json', '{')).status, 2);

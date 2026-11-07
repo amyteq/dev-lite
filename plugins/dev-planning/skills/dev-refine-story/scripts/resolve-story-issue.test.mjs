@@ -37,7 +37,7 @@ const url = (n, repo = REPO) => `https://github.com/${repo}/issues/${n}`;
 const story = (over = {}) => ({ key: KEY, docPaths: [DOC], lifecycleStatus: 'CURRENT', ...over });
 // A row as the open-issue listing returns it.
 const row = (number, over = {}) => ({ number, title: `Issue ${number}`, body: 'Unrelated.', state: 'OPEN', locked: false, url: url(number), ...over });
-const marked = (number, over = {}) => row(number, { title: 'Task export', body: `${origin()}\nStory: ${KEY}`, ...over });
+const marked = (number, over = {}) => row(number, { title: 'Task export', body: `${origin()}\nStory: ${KEY}`, authorPermission: 'write', ...over });
 const input = (over = {}) => ({ storyKey: KEY, repo: REPO, story: story(), lookup: { complete: true }, candidates: [], authority: { createAuthorized: false }, ...over });
 const can = (over = {}) => input({ authority: CAN_CREATE, ...over });
 const without = (o, ...keys) => { const c = { ...o }; for (const k of keys) delete c[k]; return c; };
@@ -86,17 +86,36 @@ cases('one marker issue is reused, and none creates only with authority and writ
 ]);
 
 const permutations = (xs) => (xs.length <= 1 ? [xs] : xs.flatMap((x, i) => permutations([...xs.slice(0, i), ...xs.slice(i + 1)]).map((p) => [x, ...p])));
-cases('several marker issues reuse the newest in any order', [
+cases('several eligible marker issues stop for a human in any order', [
   ...permutations([10, 20, 30]).map((order) => [`order ${order}`, can({ candidates: order.map((n) => marked(n)) }),
-    { action: 'reuse', code: 'REUSE_MARKED', selected: 30, duplicates: [10, 20], writes: REUSE, url: url(30), reason: ['#10, #20'] }]),
-  ['two, beside non-marker rows', can({ candidates: [row(5), marked(40), row(99), marked(7)] }), { selected: 40, duplicates: [7] }],
-  ['a locked older duplicate', can({ candidates: [marked(10, { locked: true }), marked(20)] }), { selected: 20, duplicates: [10] }],
+    { action: 'stop', code: 'DUPLICATE_MARKERS', conflicts: [10, 20, 30], reason: ['#10, #20, #30'] }]),
+  ['two, beside non-marker rows', can({ candidates: [row(5), marked(40), row(99), marked(7)] }), { code: 'DUPLICATE_MARKERS', conflicts: [7, 40] }],
+  ['a locked older one still counts', can({ candidates: [marked(10, { locked: true }), marked(20)] }), { code: 'DUPLICATE_MARKERS', conflicts: [10, 20] }],
   ['a closed newer marker issue is not a duplicate', can({ candidates: [marked(10), marked(20, { state: 'CLOSED' })] }), { selected: 10, duplicates: [] }],
+]);
+
+cases('a marker copied by an author without write access is never selected', [
+  ...['read', 'triage', 'none', null, ' Read '].map((p) => [`a newer copy by ${String(p)}`,
+    can({ candidates: [marked(10), marked(20, { authorPermission: p })] }),
+    { action: 'reuse', code: 'REUSE_MARKED', selected: 10, duplicates: [20], writes: REUSE, reason: ['#20'] }]),
+  ['the only marker issue is a copy: create, reporting it', can({ candidates: [marked(20, { authorPermission: 'read' })] }),
+    { ...CREATED, duplicates: [20], reason: ['#20'] }],
+  ['the only marker issue is a copy, without authority', input({ candidates: [marked(20, { authorPermission: 'triage' })] }),
+    { code: 'CREATE_NOT_AUTHORIZED' }],
+  ['one eligible beside two copies', can({ candidates: [marked(30, { authorPermission: 'none' }), marked(5, { authorPermission: 'Admin' }), marked(9, { authorPermission: 'read' })] }),
+    { selected: 5, duplicates: [9, 30] }],
+]);
+
+cases('an open marker issue without fetched provenance stops', [
+  ...[undefined, 1, true, {}].map((p) => [`authorPermission ${JSON.stringify(p)}`,
+    can({ candidates: [marked(10, { authorPermission: p })] }), { code: 'CANDIDATE_PROVENANCE_UNKNOWN', conflicts: [10] }]),
+  ['a closed marker issue needs none', can({ candidates: [marked(10, { authorPermission: undefined, state: 'closed' })] }), CREATED],
+  ['an unmarked row needs none', can({ candidates: [row(10)] }), CREATED],
 ]);
 
 cases('a locked selected issue stops', [
   ['the only marker issue locked', can({ candidates: [marked(10, { locked: true })] }), { code: 'ISSUE_LOCKED', conflicts: [10] }],
-  ['the newest marker issue locked', can({ candidates: [marked(10), marked(20, { locked: true })] }), { code: 'ISSUE_LOCKED', conflicts: [20] }],
+  ['the eligible marker issue locked beside a copy', can({ candidates: [marked(10, { authorPermission: 'read' }), marked(20, { locked: true })] }), { code: 'ISSUE_LOCKED', conflicts: [20] }],
 ]);
 
 const notTheStorys = [
@@ -237,7 +256,7 @@ check('no decision reads or reports readiness', () => {
 });
 
 check('a repeated invocation selects the same issue and creates nothing', () => {
-  const i = can({ candidates: [row(5), marked(10), marked(20)] });
+  const i = can({ candidates: [row(5), marked(10, { authorPermission: 'read' }), marked(20)] });
   const first = resolve(i);
   for (let k = 0; k < 3; k++) assert.deepStrictEqual(resolve(structuredClone(i)), first);
   assert.strictEqual(first.selected, 20);
@@ -332,7 +351,7 @@ check('every decision keeps its write budget, and the contract lists exactly the
       assert.strictEqual(d.issue.number, d.selected);
     } else {
       assert.strictEqual(d.selected, null);
-      assert.deepStrictEqual(d.duplicates, []);
+      if (d.action === 'stop') assert.deepStrictEqual(d.duplicates, []);
     }
   }
   const table = readFileSync(here('../references/resolver-contract.md'), 'utf8').split('## Reason codes')[1] ?? '';

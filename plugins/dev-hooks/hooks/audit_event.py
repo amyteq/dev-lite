@@ -7,7 +7,8 @@ Wired by the dev-hooks plugin as:
 
 Appends to a daily log under `$CLAUDE_PROJECT_DIR/.claude/audit/`. The directory
 gets its own `.gitignore` (`*`) on first use, so consumers need no ignore rule.
-It NEVER blocks (always exits 0) and NEVER records file contents or secret values.
+It NEVER blocks (always exits 0) and NEVER records file contents, command
+arguments or secret values: a Bash call is logged by its executable name only.
 
 Contract (Claude Code hooks):
   - stdin: JSON describing the event.
@@ -20,9 +21,11 @@ import os
 import re
 import sys
 
-MAX_CMD = 240  # truncate bash commands in the log
+MAX_CMD = 240  # truncate config change descriptions in the log
+# The first word after any leading `NAME=value` assignments.
+EXECUTABLE_RE = re.compile(r"\s*(?:\w+=\S*\s+)*([^\s;&|<>()]+)")
 
-# Redact anything that looks like a key/token/secret value in a command string.
+# Redact anything that looks like a key/token/secret value in a logged string.
 SECRET_VALUE_RE = re.compile(
     r"(eyJ[A-Za-z0-9_-]{10,})"                       # JWT-ish
     r"|(sk-[A-Za-z0-9]{8,})"                          # OpenAI-style
@@ -57,7 +60,9 @@ def summarize(data: dict) -> dict:
     ti = data.get("tool_input") or data.get("toolInput") or {}
     if isinstance(ti, dict):
         if "command" in ti:
-            out["command"] = redact(str(ti["command"]))[:MAX_CMD]
+            # Only the program name: arguments, headers and heredoc bodies can carry secrets.
+            program = EXECUTABLE_RE.match(str(ti["command"]))
+            out["executable"] = os.path.basename(program.group(1))[:64] if program else ""
         for key in ("file_path", "notebook_path", "path"):
             if key in ti:
                 out["path"] = str(ti[key])  # path only, never content

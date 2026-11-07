@@ -25,7 +25,7 @@ const write = (name, value) => {
 };
 const cli = (...args) => spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8' });
 
-const REPO = 'acme/tools';
+const REPO = 'example-org/example-repo';
 const ISSUE = 12;
 const RUN = '20261017T105400Z-5e6f7a8b';
 const EARLIER = '20261016T090000Z-5e6f7a8b';
@@ -104,8 +104,8 @@ check('AC2.2.5 another login\'s summary marker is foreign, never adopted or hidd
 });
 
 check('AC2.2.6 an unreadable summary marker of ours suspends every hide; the action is unchanged', () => {
-  for (const odd of ['<!-- dev-analyse-rp:summary repo=acme/tools issue=12 -->', `${summary(EARLIER).split('\n')[0]} `,
-    summary(EARLIER, 'acme/other'), summary(EARLIER, REPO, 13), 'dev-analyse-rp:summary was posted below']) {
+  for (const odd of ['<!-- dev-analyse-rp:summary repo=example-org/example-repo issue=12 -->', `${summary(EARLIER).split('\n')[0]} `,
+    summary(EARLIER, 'example-org/other-repo'), summary(EARLIER, REPO, 13), 'dev-analyse-rp:summary was posted below']) {
     const r = selectComments(scan([comment(1, summary(EARLIER)), comment(7, odd), comment(9, summary(RUN))]));
     assert.strictEqual(r.action, 'adopt', odd);
     assert.deepStrictEqual(r.unrecognised, [7], odd);
@@ -240,14 +240,14 @@ check('AC7.3 parts 1..j of this run continue at j+1; all m adopt; duplicates, an
 
 check('AC7.4 another login is foreign; an inexact result line of ours is unrecognised and empties hide', () => {
   const r = selectComments(featScan([comment(1, summary(EARLIER)), comment(2, result(EARLIER), { author: 'someone' }),
-    comment(3, '<!-- dev-analyse-rp:result repo=acme/tools issue=12 run=x -->'), comment(4, result(EARLIER, 1, 1, REPO, 99)),
+    comment(3, '<!-- dev-analyse-rp:result repo=example-org/example-repo issue=12 run=x -->'), comment(4, result(EARLIER, 1, 1, REPO, 99)),
     comment(5, result(EARLIER, 3, 2))]));
   assert.deepStrictEqual([r.action, r.foreign, r.unrecognised, r.hide, r.previous], ['post', [2], [3, 4, 5], [], { id: 1, run: EARLIER }]);
 });
 
 check('AC7.6 the 16 Oct hand-made posts and the eval record are neither results nor summaries', () => {
   const comments = ['<!-- ft-104-rp18-analysis-2026-10-16 -->', '<!-- dev-analyse-rp:RP-43:2026-10-16 -->', '<!-- dev-analyse-rp-51-2026-10-17 -->',
-    '<!-- dev-analyse-rp:eval-record repo=acme/tools issue=12 -->'].map((first, i) => comment(i + 1, `${first}\n## Analysis\n`));
+    '<!-- dev-analyse-rp:eval-record repo=example-org/example-repo issue=12 -->'].map((first, i) => comment(i + 1, `${first}\n## Analysis\n`));
   assert.deepStrictEqual(selectComments(featScan(comments)), { action: 'post', next: 1, run: RUN, previous: null, parts: null, thisRun: [], hide: [], foreign: [], unrecognised: [] });
 });
 

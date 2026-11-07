@@ -20,13 +20,13 @@ Run it as `node "${CLAUDE_SKILL_DIR}/scripts/resolve-story-issue.mjs" <input.jso
   "lookup": { "complete": true },
   "candidates": [
     { "number": 101, "state": "OPEN", "locked": false, "url": "https://github.com/<owner>/<repo>/issues/101", "body": "Mentions STY_<n> in passing." },
-    { "number": 205, "state": "OPEN", "locked": false, "url": "https://github.com/<owner>/<repo>/issues/205", "body": "<!-- dev-refine-story:origin story=STY_<n> run=2026-01-02T03-04-05Z -->\n…" }
+    { "number": 205, "state": "OPEN", "locked": false, "url": "https://github.com/<owner>/<repo>/issues/205", "body": "<!-- dev-refine-story:origin story=STY_<n> run=2026-01-02T03-04-05Z -->\n…", "authorPermission": "write" }
   ],
   "authority": { "createAuthorized": false, "effectivePermission": "write" }
 }
 ```
 
-#205 is reused: its first line is the Story's marker, while #101 only mentions the Story.
+#205 is reused: its first line is the Story's marker and its author has write access, while #101 only mentions the Story.
 
 - `repo` is one `owner/repo`; anything else is `MALFORMED_INPUT`.
 - `storyKey` is `STY_<positive integer>` with no leading zero, trimmed and matched case-insensitively. An `FT_<positive integer>` key is `FEAT_KEY_NOT_STORY`; anything else is `MALFORMED_KEY`.
@@ -62,6 +62,8 @@ Every row is checked before any is judged, so an unreadable row cannot hide the 
 
 The repository and URL match case-insensitively. Other row fields, such as `title`, are ignored.
 
+An open row whose first line is this Story's marker must also carry `authorPermission`: the issue author's collaborator permission as a string, or `null` when the author account no longer exists. Anything else is `CANDIDATE_PROVENANCE_UNKNOWN`, naming every such row. Anyone who can open an issue can copy a marker, so only an author with `admin`, `maintain` or `write`, in any casing, makes a marker issue eligible. Other rows need no `authorPermission`.
+
 ### Authority
 
 `authority.createAuthorized` must be `true`. `authority.effectivePermission` is the collaborator-permission answer; only `admin`, `maintain` or `write`, in any casing, may create. Both are read only when no open marker issue exists.
@@ -90,12 +92,13 @@ The key matches case-insensitively, as a token not preceded or followed by a let
 
 ## Selection
 
-The Story's issues are the open rows whose first line is marked. The title, a mention in the body, a marker on a later line, a closed marker issue and a feat tracking issue listing the Story never select an issue and never block a create.
+The Story's eligible issues are the open rows whose first line is marked and whose author has write access. Open marked rows by any other author are listed in `duplicates`, ascending, for a human, and are never selected. The title, a mention in the body, a marker on a later line, a closed marker issue and a feat tracking issue listing the Story never select an issue and never block a create.
 
-- **One or more:** the newest, the highest number, is selected. Every other open marker issue is listed in `duplicates`, ascending, for a human to reconcile. A locked selected issue is `ISSUE_LOCKED`, naming it; a locked duplicate changes nothing.
-- **None:** without `createAuthorized: true`, `CREATE_NOT_AUTHORIZED`; with it but without write permission, `INSUFFICIENT_PERMISSION`; otherwise `CREATE_AUTHORIZED`.
+- **Several eligible:** `DUPLICATE_MARKERS`, naming them all; a human decides which is the Story's issue.
+- **One eligible:** it is selected. A locked selected issue is `ISSUE_LOCKED`, naming it.
+- **None eligible:** without `createAuthorized: true`, `CREATE_NOT_AUTHORIZED`; with it but without write permission, `INSUFFICIENT_PERMISSION`; otherwise `CREATE_AUTHORIZED`, still reporting `duplicates`.
 
-The whole order is: target, key, Story envelope, lookup, candidate set, row gates, unreadable marker, selection, create gate.
+The whole order is: target, key, Story envelope, lookup, candidate set, row gates, unreadable marker, marker provenance, selection, create gate.
 
 ## Output
 
@@ -114,14 +117,14 @@ The whole order is: target, key, Story envelope, lookup, candidate set, row gate
 
 - `plannedWrites` is the invariant to check in review: a `stop` plans `{0, 0}`, a `reuse` `{0, 1}` and a `create` `{1, 1}`.
 - `issue` and `selected` name the reused issue, else `null`.
-- `duplicates` lists the other open marker issues on a reuse, each once and never the selected one, else `[]`.
+- `duplicates` lists the open marker issues whose author lacks write access on a reuse or create, each once and never the selected one; a stop lists `[]`.
 - `conflicts` lists the issue IDs a stop is about, each once, else `[]`.
 
 ## Reason codes
 
 | Code | Action | Meaning |
 |---|---|---|
-| `REUSE_MARKED` | reuse | The newest open marker issue; others are `duplicates` |
+| `REUSE_MARKED` | reuse | The one open marker issue whose author has write access; copies by other authors are `duplicates` |
 | `CREATE_AUTHORIZED` | create | No open marker issue, and both authority gates pass |
 | `MALFORMED_INPUT` | stop | No single `owner/repo` target |
 | `MALFORMED_KEY` | stop | Not a `STY_<positive integer>` key |
@@ -138,6 +141,8 @@ The whole order is: target, key, Story envelope, lookup, candidate set, row gate
 | `CANDIDATE_STATE_UNKNOWN` | stop | A row's `state` is neither `open` nor `closed` |
 | `CANDIDATE_LOCK_UNKNOWN` | stop | A row carries no boolean `locked` |
 | `MARKER_UNREADABLE` | stop | An open row's first line nearly is this Story's marker |
+| `CANDIDATE_PROVENANCE_UNKNOWN` | stop | An open marker row carries no fetched `authorPermission` |
+| `DUPLICATE_MARKERS` | stop | Two or more open marker issues by authors with write access |
 | `ISSUE_LOCKED` | stop | The selected marker issue is locked |
 | `CREATE_NOT_AUTHORIZED` | stop | No open marker issue and no creation authority |
 | `INSUFFICIENT_PERMISSION` | stop | Authorized, but the permission cannot open an issue |

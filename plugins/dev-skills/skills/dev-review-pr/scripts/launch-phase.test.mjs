@@ -135,6 +135,7 @@ test('each supported CLI role uses configured defaults without rewriting configu
         assert.ok(hasPair(argv, '--tools', role === 'reviewer' ? 'Read,Glob,Grep' : 'Read,Glob,Grep,Edit,Write,Bash'));
         assert.ok(argv.includes('--strict-mcp-config') && !argv.includes('--model'));
         assert.ok(hasPair(argv, '--permission-mode', 'acceptEdits'));
+        assert.ok(hasPair(argv, '--setting-sources', 'user'), 'PR-controlled project settings must not load');
       }
       assert.equal(readFileSync(config, 'utf8'), before);
       assert.deepEqual(readdirSync(join(f.home, '.codex')), ['config.toml']);

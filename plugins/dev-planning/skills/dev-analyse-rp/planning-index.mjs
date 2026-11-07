@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Planning index for dev-analyse-rp (references/reconciliation.md): the feats and stories
-// their docs' frontmatter declares at one commit, a check of a proposal's existing homes
+// their docs' frontmatter declares at one commit, digested with every doc's full text, a check of a proposal's existing homes
 // against that index, and the next free FT_/STY_ numbers. It reads committed repository
 // files through git only; it never calls GitHub, so issue labels and tracking-issue bodies
 // can never become index input.
@@ -139,6 +139,7 @@ const unique = (rows, field, what) => {
 /** The index of `docs` ({path, text} at one commit), or a BuildStop naming the first doc that cannot be trusted. */
 export function indexFromDocs(commit, docs) {
   const rows = [];
+  const bodies = [];
   for (const { path, text } of [...docs].sort((a, b) => (a.path < b.path ? -1 : 1))) {
     const level = Object.keys(LEVELS).find((l) => path.startsWith(`${LEVELS[l].dir}/`));
     if (!level || !path.endsWith('.md') || path === `${LEVELS[level].dir}/README.md`) continue;
@@ -147,6 +148,7 @@ export function indexFromDocs(commit, docs) {
       throw new BuildStop(path, `is not named ${LEVELS[level].prefix}_<n>_<snake_slug>.md directly under ${LEVELS[level].dir}`);
     }
     rows.push(docRow(level, path, text));
+    bodies.push([path, crypto.createHash('sha256').update(text).digest('hex')]);
   }
   unique(rows, 'key', 'id');
   const feats = rows.filter((r) => r.level === 'feat');
@@ -159,7 +161,9 @@ export function indexFromDocs(commit, docs) {
   }
   rows.sort((a, b) => (a.level === b.level ? keyNumber(a.key) - keyNumber(b.key) : a.level === 'feat' ? -1 : 1));
   const counts = { feat: feats.length, story: rows.length - feats.length };
-  const digest = `sha256:${crypto.createHash('sha256').update(JSON.stringify(rows)).digest('hex')}`;
+  // The digest also covers each doc's full text, so a body-only edit to a feat's scope or a story's
+  // acceptance criteria changes it even though no frontmatter row does.
+  const digest = `sha256:${crypto.createHash('sha256').update(JSON.stringify({ rows, bodies })).digest('hex')}`;
   return { schema: SCHEMA_TAG, commit, digest, counts, rows };
 }
 

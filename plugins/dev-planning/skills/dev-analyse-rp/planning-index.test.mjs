@@ -86,7 +86,19 @@ check('a clean repository builds a sorted, digested index of feats then stories'
   assert.strictEqual(index.commit, git(root, 'rev-parse', 'HEAD').trim());
   assert.deepStrictEqual(index.rows.map((r) => r.key), ['FT_101', 'FT_102', 'STY_101', 'STY_102', 'STY_103']);
   assert.deepStrictEqual(index.counts, { feat: 2, story: 3 });
-  assert.strictEqual(index.digest, `sha256:${crypto.createHash('sha256').update(JSON.stringify(index.rows)).digest('hex')}`);
+  const bodies = [...index.rows].sort((a, b) => (a.path < b.path ? -1 : 1)).map((r) => [r.path,
+    crypto.createHash('sha256').update(git(root, 'show', `HEAD:${r.path}`)).digest('hex')]);
+  assert.strictEqual(index.digest, `sha256:${crypto.createHash('sha256').update(JSON.stringify({ rows: index.rows, bodies })).digest('hex')}`);
+});
+
+check('a body-only edit to a feat scope or a story criterion changes the digest, with the rows unchanged', () => {
+  const before = indexFromDocs('c', docsOf());
+  for (const at of ['docs/feats/FT_101_task_board.md', 'docs/stories/STY_101_add_task.md']) {
+    const after = indexFromDocs('c', docsOf({ [at]: `${BASE[at]}\n- AC-1: a revised criterion\n` }));
+    assert.deepStrictEqual(after.rows, before.rows, at);
+    assert.notStrictEqual(after.digest, before.digest, at);
+  }
+  assert.strictEqual(indexFromDocs('c', docsOf()).digest, before.digest, 'same docs, same digest');
 });
 
 check('rows take their fields from the frontmatter and record the doc path', () => {
