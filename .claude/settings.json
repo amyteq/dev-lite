@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "extraKnownMarketplaces": {
+    "dev-lite": {
+      "source": {
+        "source": "settings",
+        "name": "dev-lite",
+        "plugins": [
+          {
+            "name": "dev-skills",
+            "source": {
+              "source": "git-subdir",
+              "url": "https://github.com/amyteq/dev-lite.git",
+              "path": "plugins/dev-skills",
+              "sha": "170357e0448234be6e084c87c676e0fdce5cba86"
+            }
+          },
+          {
+            "name": "dev-planning",
+            "source": {
+              "source": "git-subdir",
+              "url": "https://github.com/amyteq/dev-lite.git",
+              "path": "plugins/dev-planning",
+              "sha": "170357e0448234be6e084c87c676e0fdce5cba86"
+            }
+          },
+          {
+            "name": "dev-hooks",
+            "source": {
+              "source": "git-subdir",
+              "url": "https://github.com/amyteq/dev-lite.git",
+              "path": "plugins/dev-hooks",
+              "sha": "170357e0448234be6e084c87c676e0fdce5cba86"
+            }
+          }
+        ]
+      },
+      "autoUpdate": true
+    }
+  },
+  "enabledPlugins": {
+    "dev-skills@dev-lite": true,
+    "dev-planning@dev-lite": true,
+    "dev-hooks@dev-lite": true
+  },
+  "permissions": {
+    "deny": [
+      "Bash(git push *--force*)",
+      "Bash(git push -f*)",
+      "Bash(git push * -f*)",
+      "Bash(git filter-branch*)",
+      "Bash(git filter-repo*)",
+      "Read(./.env.production)",
+      "Read(~/.ssh/**)"
+    ]
+  }
+}

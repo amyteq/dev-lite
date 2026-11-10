@@ -1,0 +1,13 @@
+[marketplaces.dev-lite]
+source_type = "git"
+source = "https://github.com/amyteq/dev-lite.git"
+ref = "170357e0448234be6e084c87c676e0fdce5cba86"
+
+[plugins."dev-skills@dev-lite"]
+enabled = true
+
+[plugins."dev-planning@dev-lite"]
+enabled = true
+
+[plugins."dev-hooks@dev-lite"]
+enabled = true
