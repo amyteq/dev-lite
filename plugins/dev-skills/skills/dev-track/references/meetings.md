@@ -24,42 +24,10 @@ done < $S/NUMBER/attachments.txt
   The pattern stops at the end of a file name or asset id, so the prose around a bare URL stays out; a name with other characters is cut short and fails to download, so check `attachments.txt` against the discussion. At most 20 files come down (the rest go to `skipped.txt`); a failed download or one over 50 MB is deleted and its URL goes to `failed.txt`. Report both lists. An `/assets/` link has no file name: take its type from the bytes (`file $S/NUMBER/att$n/file`). Read a `.txt` directly; take only the text of a `.pptx`/`.docx`, running nothing from the file:
 
 ```bash
-python3 -I - $S/NUMBER/att1/file <<'EOF'
-import re, struct, sys, zipfile, xml.etree.ElementTree as ET
-MEMBERS, EACH, TOTAL = 2000, 20 << 20, 200 << 20
-DIRECTORY = MEMBERS << 8
-with open(sys.argv[1], 'rb') as f:                 # the end record: 22 B + a comment of up to 64 KiB
-    f.seek(0, 2); f.seek(max(0, f.tell() - (1 << 16) - 22)); tail = f.read()
-e = tail.rfind(b'PK\x05\x06')
-if e < 0 or len(tail) < e + 22:
-    sys.exit('no zip end record: nothing read')
-members, directory = struct.unpack('<HI', tail[e + 10:e + 16])
-if members > MEMBERS or directory > DIRECTORY:     # checked before ZipFile parses the directory
-    sys.exit(f'{members} members, {directory} byte directory declared: over the limit, nothing read')
-z = zipfile.ZipFile(sys.argv[1])
-info = z.infolist()
-total = sum(i.file_size for i in info)
-if len(info) > MEMBERS or total > TOTAL:
-    sys.exit(f'{len(info)} members, {total} bytes uncompressed: over the limit, nothing read')
-names = [i.filename for i in info if i.file_size <= EACH]
-for i in info:
-    if i.file_size > EACH: print('## skipped, too large:', i.filename, i.file_size)
-if 'word/document.xml' in names:
-    W = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
-    for p in ET.fromstring(z.read('word/document.xml')).iter(W + 'p'):
-        t = ''.join(r.text or '' for r in p.iter(W + 't'))
-        if t.strip(): print(t)
-else:
-    A = '{http://schemas.openxmlformats.org/drawingml/2006/main}'
-    for n in sorted((n for n in names if re.fullmatch(r'ppt/slides/slide\d+\.xml', n)), key=lambda n: int(re.findall(r'\d+', n)[0])):
-        print('##', n)
-        for p in ET.fromstring(z.read(n)).iter(A + 'p'):
-            t = ''.join(r.text or '' for r in p.iter(A + 't'))
-            if t.strip(): print(t)
-EOF
+H text --file $S/NUMBER/att1/file > $S/NUMBER/att1/text.txt
 ```
 
-  A zip whose declared member count, directory size or uncompressed total is over the limits is refused before anything is read, and a member over 20 MB is skipped; name a skipped or refused file in the report like a failed download.
+  It prints one line per paragraph, each slide under `## ppt/slides/slideN.xml`. A zip whose declared member count, directory size or uncompressed total is over the limits is refused (exit 1) before anything is read, a member over 20 MB is skipped and named (`## skipped, too large: …`), and a broken, encrypted or zip64 file, or a member larger than it declares, exits 2; name a skipped or refused file in the report like a failed download.
 
 ## 2. The shape of the original picks the `H body` options
 

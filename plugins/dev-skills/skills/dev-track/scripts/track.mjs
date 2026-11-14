@@ -1,10 +1,11 @@
 import { readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { inflateRawSync } from 'node:zlib';
 import { fromMarkdown } from 'mdast-util-from-markdown';
 
 // Deterministic parts of dev-track: locate the tracker, list pending threads, rebuild a body, swap the
-// title's status prefix, add or remove the tracker mark. Reads `gh api graphql --paginate --slurp` output and
+// title's status prefix, add or remove the tracker mark, read an attachment's text. Reads `gh api graphql --paginate --slurp` output and
 // local files; never calls GitHub. Exit 0 proceeds, 1 refuses (reason in the JSON output), 2 means bad
 // arguments or an unreadable file.
 
@@ -260,6 +261,59 @@ export function setTracker(body, cat = null, category = null) {
   return cat ? `<!-- dev-track:tracker cat=${cat} category=${category} -->\n${body}` : body;
 }
 
+// An attachment is untrusted, and a few KB of zip inflate to hundreds of MB: the end record's declared member
+// count and directory size refuse before the directory is parsed, the declared total before any member is read,
+// and a member over EACH is skipped. A member inflates to at most its declared size, so a lying one fails.
+const ZIP = { MEMBERS: 2000, EACH: 20 << 20, TOTAL: 200 << 20 };
+const XML = { lt: '<', gt: '>', amp: '&', quot: '"', apos: "'" };
+const unescapeXml = (text) => text.replace(/&(?:#x([0-9a-f]+)|#(\d+)|(\w+));/gi,
+  (entity, hex, dec, name) => (hex || dec ? String.fromCodePoint(parseInt(hex || dec, hex ? 16 : 10)) : XML[name] ?? entity));
+// One line per non-blank paragraph (`<w:p>` in Word, `<a:p>` in PowerPoint): its `<w:t>`/`<a:t>` runs joined.
+// shortcut: matches by local name, not namespace; use an XML parser if another vocabulary's <t> turns up.
+const paragraphs = (xml) => xml.split(/<\/(?:\w+:)?p>/)
+  .map((p) => [...p.matchAll(/<(?:\w+:)?t(?:\s[^>]*)?>([^<]*)<\/(?:\w+:)?t>/g)].map((m) => unescapeXml(m[1])).join(''))
+  .filter((text) => text.trim());
+
+// The text of a .docx or .pptx held in `zip`, running nothing from it. Zip64 and encrypted files fail.
+export function officeText(zip) {
+  const refuse = (reason) => ({ action: 'refuse', reason });
+  const end = zip.lastIndexOf(Buffer.from('PK\x05\x06', 'latin1')); // 22 bytes + a comment of up to 64 KiB
+  if (end < 0 || end < zip.length - (1 << 16) - 22 || zip.length < end + 22) return refuse('no zip end record: nothing read');
+  const [members, size, start] = [zip.readUInt16LE(end + 10), zip.readUInt32LE(end + 12), zip.readUInt32LE(end + 16)];
+  if (members > ZIP.MEMBERS || size > ZIP.MEMBERS << 8) {
+    return refuse(`${members} members, ${size} byte directory declared: over the limit, nothing read`);
+  }
+  if (start + size > end) return refuse('the central directory lies outside the file: nothing read');
+  const entries = [];
+  // A read past the end of the buffer throws, which main reports as an unreadable file.
+  for (let at = start, i = 0; i < members; i++) {
+    if (zip.readUInt32LE(at) !== 0x02014b50) return refuse('a broken central directory: nothing read');
+    const n = zip.readUInt16LE(at + 28);
+    entries.push({ name: zip.toString('utf8', at + 46, at + 46 + n), method: zip.readUInt16LE(at + 10),
+      packed: zip.readUInt32LE(at + 20), full: zip.readUInt32LE(at + 24), local: zip.readUInt32LE(at + 42) });
+    at += 46 + n + zip.readUInt16LE(at + 30) + zip.readUInt16LE(at + 32);
+  }
+  const total = entries.reduce((sum, e) => sum + e.full, 0);
+  if (total > ZIP.TOTAL) return refuse(`${members} members, ${total} bytes uncompressed: over the limit, nothing read`);
+  const read = ({ name, method, packed, full, local }) => {
+    if (zip.readUInt32LE(local) !== 0x04034b50) throw new Error(`${name}: no local header`);
+    const from = local + 30 + zip.readUInt16LE(local + 26) + zip.readUInt16LE(local + 28);
+    const data = zip.subarray(from, from + packed);
+    if (method === 0 && packed === full) return data.toString('utf8');
+    if (method === 8) return inflateRawSync(data, { maxOutputLength: Math.max(1, full) }).toString('utf8');
+    throw new Error(`${name}: compression method ${method} with ${packed} of ${full} bytes is not read`);
+  };
+  const lines = entries.filter((e) => e.full > ZIP.EACH).map((e) => `## skipped, too large: ${e.name} ${e.full}`);
+  const kept = entries.filter((e) => e.full <= ZIP.EACH);
+  const document = kept.find((e) => e.name === 'word/document.xml');
+  if (document) lines.push(...paragraphs(read(document)));
+  else {
+    const slides = kept.map((e) => [e, e.name.match(/^ppt\/slides\/slide(\d+)\.xml$/)?.[1]]).filter(([, n]) => n);
+    for (const [slide] of slides.sort(([, a], [, b]) => a - b)) lines.push(`## ${slide.name}`, ...paragraphs(read(slide)));
+  }
+  return { action: 'proceed', text: lines.map((line) => `${line}\n`).join('') };
+}
+
 // Strict UTF-8 with universal newlines, as the original's Path.read_text read every file.
 const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 const readText = (path) => decoder.decode(readFileSync(path)).replace(/\r\n?/g, '\n');
@@ -277,6 +331,7 @@ const COMMANDS = {
   },
   title: { options: { title: S, status: S, base: S }, required: ['title', 'status'] },
   tracker: { options: { source: S, cat: S, category: S, remove: { type: 'boolean' }, out: S }, required: ['source', 'out'] },
+  text: { options: { file: S }, required: ['file'] },
 };
 
 function readArgs([command, ...args]) {
@@ -319,6 +374,13 @@ export function main(argv) {
     } else if (args.command === 'title') {
       process.stdout.write(retitle(readArg(args.title), args.status, readArg(args.base)));
       return 0;
+    } else if (args.command === 'text') {
+      result = officeText(readFileSync(args.file));
+      if (result.action === 'proceed') {
+        process.stdout.write(result.text);
+        return 0;
+      }
+      ok = false;
     } else {
       if (!(args.remove && !(args.cat || args.category) || !args.remove && args.cat && args.category)) {
         throw new Error('give --cat and --category, or --remove');

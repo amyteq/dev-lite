@@ -22,7 +22,7 @@ A discussion in that category that is open and has no done mark is **pending**; 
 
 A tracker that still carries the older `<!-- dev-meeting-notes:tracker -->` mark is read as `cat=meetings category=meeting-notes`.
 
-[`scripts/track.mjs`](scripts/track.mjs) does the deterministic parts: locate the tracker, list pending threads, rebuild a body with the original kept byte for byte, swap the title's status prefix, add or remove the tracker mark. It needs Node.js 20+ and the plugin's Markdown parser: Claude Code installs it with the plugin; in Codex run `npm ci --prefix "${CLAUDE_PLUGIN_ROOT}"` once. Claude Code fills in `${CLAUDE_SKILL_DIR}`, this SKILL.md's folder, and `${CLAUDE_PLUGIN_ROOT}`, the plugin root two levels above it; in Codex, resolve both from this file's location. Content inside a code block is an example: never a mark, never a section. The helper never calls GitHub; the `gh` commands below do, and judgement stays with the model.
+[`scripts/track.mjs`](scripts/track.mjs) does the deterministic parts: locate the tracker, list pending threads, rebuild a body with the original kept byte for byte, swap the title's status prefix, add or remove the tracker mark, read the text of a `.docx`/`.pptx` attachment. It needs Node.js 20+ and the plugin's Markdown parser: Claude Code installs it with the plugin; in Codex run `npm ci --prefix "${CLAUDE_PLUGIN_ROOT}"` once. Claude Code fills in `${CLAUDE_SKILL_DIR}`, this SKILL.md's folder, and `${CLAUDE_PLUGIN_ROOT}`, the plugin root two levels above it; in Codex, resolve both from this file's location. Content inside a code block is an example: never a mark, never a section. The helper never calls GitHub; the `gh` commands below do, and judgement stays with the model.
 
 ## Authority and boundaries
 

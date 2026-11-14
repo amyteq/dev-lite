@@ -1,4 +1,4 @@
-// Tests for track.mjs and the attachment commands in references/meetings.md. Run with
+// Tests for track.mjs and the attachment grep in references/meetings.md. Run with
 // `node --test skills/dev-track/scripts/track.test.mjs` or `npm test` from the plugin root.
 // Every input is a fixture; no GitHub call is made.
 import assert from 'node:assert/strict';
@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { deflateRawSync } from 'node:zlib';
 import { brief, hasDuplicate, isDone, locate, rebuild, retitle, setTracker, trackerOf } from './track.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -460,46 +461,67 @@ test('the documented attachment grep yields exactly each bare URL next to prose'
   assert.deepEqual([out.split(`${url}\n`).length - 1, out.split(`${asset}\n`).length - 1], [7, 3]);
 });
 
-// An attachment is untrusted data, and a few KB of zip decompress to hundreds of MB, so the .docx/.pptx reader
-// in meetings.md bounds a file by its declared sizes before reading. The reader is Python, so these need python3.
-const python = spawnSync('python3', ['--version']).status === 0 ? false : 'needs python3';
-const snippet = () => {
-  const found = readFileSync(MEETINGS, 'utf8').match(/<<'EOF'\n([\s\S]*?\n)EOF\n/);
-  assert.ok(found, 'meetings.md no longer documents the extraction snippet');
-  return found[1];
-};
-const readZip = (path) => spawnSync('python3', ['-I', '-', path], { input: snippet(), encoding: 'utf8' });
-// Members are [name, text] or [name, a count of NUL bytes].
-const ZIP = "import json, sys, zipfile\nwith zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED) as z:\n"
-  + "    for name, data in json.load(sys.stdin):\n        z.writestr(name, b'\\0' * data if isinstance(data, int) else data)\n";
+// An attachment is untrusted data, and a few KB of zip decompress to hundreds of MB, so `track.mjs text` bounds a
+// .docx/.pptx by its declared sizes before reading. Members are [name, text, declared size (default: the real one)].
 const zip = (name, members) => {
-  const path = join(scratch, name);
-  assert.equal(spawnSync('python3', ['-I', '-c', ZIP, path], { input: JSON.stringify(members) }).status, 0);
-  return path;
+  const locals = [], central = [];
+  let offset = 0;
+  for (const [member, text, declared] of members) {
+    const raw = Buffer.from(text), data = deflateRawSync(raw), path = Buffer.from(member);
+    const local = Buffer.alloc(30), entry = Buffer.alloc(46);
+    local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(8, 8); local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(raw.length, 22); local.writeUInt16LE(path.length, 26);
+    entry.writeUInt32LE(0x02014b50, 0); entry.writeUInt16LE(8, 10); entry.writeUInt32LE(data.length, 20);
+    entry.writeUInt32LE(declared ?? raw.length, 24); entry.writeUInt16LE(path.length, 28); entry.writeUInt32LE(offset, 42);
+    locals.push(local, path, data);
+    central.push(entry, path);
+    offset += 30 + path.length + data.length;
+  }
+  const directory = Buffer.concat(central), end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(members.length, 8); end.writeUInt16LE(members.length, 10);
+  end.writeUInt32LE(directory.length, 12); end.writeUInt32LE(offset, 16);
+  return file(name, Buffer.concat([...locals, directory, end]));
 };
+const readZip = (path) => cli('text', '--file', path);
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const docx = (text) => `<w:document xmlns:w="${W}"><w:body><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:body></w:document>`;
+const A = 'http://schemas.openxmlformats.org/drawingml/2006/main';
+const slide = (...lines) =>
+  `<p:sld xmlns:a="${A}"><p:txBody>${lines.map((t) => `<a:p><a:r><a:t>${t}</a:t></a:r></a:p>`).join('')}</p:txBody></p:sld>`;
 
-test('a real document is still read', { skip: python }, () => {
+test('a real document is still read', () => {
   const done = readZip(zip('real.docx', [['word/document.xml', docx('会议要点')]]));
   assert.deepEqual([done.status, done.stdout], [0, '会议要点\n'], done.stderr);
 });
 
-test('too many members or too much data is refused before any read', { skip: python }, () => {
+test('a document keeps its runs, entities and paragraphs, and drops blank ones', () => {
+  const xml = `<w:document xmlns:w="${W}"><w:body><w:p><w:pPr/><w:r><w:t xml:space="preserve">Owner: </w:t></w:r>`
+    + '<w:r><w:tab/><w:t>A &amp; B &lt;QA&gt; &#x4F1A;&#35758;</w:t></w:r></w:p><w:p><w:r><w:t> </w:t></w:r></w:p><w:p/>'
+    + '<w:p><w:r><w:t>Next</w:t><w:t/></w:r></w:p></w:body></w:document>';
+  const done = readZip(zip('runs.docx', [['word/document.xml', xml]]));
+  assert.deepEqual([done.status, done.stdout], [0, 'Owner: A & B <QA> 会议\nNext\n'], done.stderr);
+});
+
+test('slides come out in slide order, each under its name', () => {
+  const done = readZip(zip('deck.pptx', [['ppt/slides/slide10.xml', slide('ten')], ['ppt/slides/slide2.xml', slide('two', 'deux')],
+    ['ppt/slides/_rels/slide2.xml.rels', '<x/>'], ['ppt/notesSlides/notesSlide1.xml', slide('notes')]]));
+  assert.equal(done.status, 0, done.stderr);
+  assert.equal(done.stdout, '## ppt/slides/slide2.xml\ntwo\ndeux\n## ppt/slides/slide10.xml\nten\n');
+});
+
+test('too many members or too much data is refused before any read', () => {
   const bombs = { members: Array.from({ length: 2001 }, (_, i) => [`ppt/slides/slide${i}.xml`, '']),
-    bytes: [['word/document.xml', 201 << 20]] }; // 201 MB out of ~200 KB of zip
+    bytes: [['word/document.xml', docx('x'), 201 << 20]] }; // 201 MB declared
   for (const [name, members] of Object.entries(bombs)) {
     const done = readZip(zip(`${name}.zip`, members));
-    assert.deepEqual([done.status, done.stdout], [1, ''], name);
-    assert.match(done.stderr, /over the limit/, name);
+    assert.equal(done.status, 1, name);
+    assert.match(JSON.parse(done.stdout).reason, /over the limit, nothing read/, name);
   }
 });
 
-test('a huge declaration is refused before the directory is parsed', { skip: python }, () => {
-  // ZipFile builds one object per central-directory entry, so 100,000 empty members cost tens of MB before any
-  // cap on infolist() can refuse them. The end record's own count and directory size have to refuse first.
-  // Patching a one-member zip's end record tests that without the fixture: only a run that stops before
-  // parsing never learns the directory really holds one entry.
+test('a huge declaration is refused before the directory is parsed', () => {
+  // Patching a one-member zip's end record: only a run that stops before parsing never learns the directory
+  // really holds one entry.
   const path = zip('declared.docx', [['word/document.xml', docx('一个成员')]]);
   const raw = readFileSync(path);
   const end = raw.lastIndexOf(Buffer.from('PK\x05\x06', 'latin1')); // count: 2 bytes at +10, directory size: 4 at +12
@@ -509,15 +531,22 @@ test('a huge declaration is refused before the directory is parsed', { skip: pyt
     patch(patched);
     writeFileSync(path, patched);
     const done = readZip(path);
-    assert.deepEqual([done.status, done.stdout], [1, ''], name);
-    assert.match(done.stderr, /declared: over the limit/, name);
+    assert.equal(done.status, 1, name);
+    assert.match(JSON.parse(done.stdout).reason, /declared: over the limit/, name);
   }
   writeFileSync(path, raw); // the same file, its own declaration intact, is still read
   assert.equal(readZip(path).stdout, '一个成员\n');
 });
 
-test('an oversize member is skipped and reported', { skip: python }, () => {
-  const done = readZip(zip('oversize.docx', [['word/document.xml', 21 << 20]]));
+test('an oversize member is skipped and reported', () => {
+  const done = readZip(zip('oversize.docx', [['word/document.xml', docx('x'), 21 << 20]]));
   assert.equal(done.status, 0, done.stderr);
   assert.deepEqual(done.stdout.split('\n').filter(Boolean), ['## skipped, too large: word/document.xml 22020096']);
+});
+
+test('a member larger than it declares, or a file that is no zip, is not read', () => {
+  const lying = readZip(zip('lying.docx', [['word/document.xml', docx('x'.repeat(1000)), 100]]));
+  assert.deepEqual([lying.status, lying.stdout], [2, '']);
+  const plain = readZip(file('plain.docx', 'not a zip'));
+  assert.deepEqual([plain.status, JSON.parse(plain.stdout).reason], [1, 'no zip end record: nothing read']);
 });
