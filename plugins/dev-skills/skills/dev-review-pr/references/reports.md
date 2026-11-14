@@ -1,5 +1,7 @@
 # Review and disposition reports
 
+Write the prose, headings and table labels in the language of the PR body; the English placeholders below only instruct the agent. Keep the `Base:`, `Reviewed head:` and `Verdict:` labels in English exactly as shown, because a merge gate such as `dev-merge` parses them, and keep markers, IDs, phase/status tokens and CLI metadata unchanged.
+
 Use these formats as Markdown comments. Replace placeholders with observed facts; omit no-findings rows rather than inventing findings. Empty tables may be replaced by "No new findings" / "No fixes required" plus the ledger summary. Escape pipes inside table cells. Link exact file lines at the reviewed commit, tests, and prior comments. Include the run/round/phase marker to reconcile uncertain publication.
 
 Do not repeat the PR URL — the comment already lives on the PR. Write each SHA as a short hash linked to its exact full-SHA commit URL, and carry every other reference on descriptive link text; no bare URLs in comment prose. Both signatures are defined in [Signature fields](#signature-fields).
@@ -73,7 +75,7 @@ Unresolved P0/P1: IDs or none. Residual P2/P3: IDs or none.
 🔎 ACTUAL_AGENT·ACTUAL_MODEL·ACTUAL_EFFORT · read-only head: [HEAD_SHA_SHORT](HEAD_COMMIT_URL) · context: OBSERVED_CONTEXT_OR_NA · STARTED_TIMESTAMP TZ · MEASURED_ELAPSED · VERDICT
 ```
 
-In round 1 write `previous review: none` and `writer disposition: none` as plain text rather than empty links, and drop the delta range from a full review.
+In round 1 write `previous review: none` and `writer disposition: none` as plain text rather than empty links, and drop the delta range from a full review. Write exactly one `Verdict:` line, outside any code block: a merge gate reads the verdict and both SHAs from the report.
 
 The findings table shows only unsettled work: one row for each ID in `open` (new or reopened), `fixed-pending-review`, `rebutted-pending-review`, `deferred-pending-review` or `residual`. `resolved`, `rebuttal-accepted` and `deferred-accepted` IDs appear only on the `Ledger:` line, each linked to the review that settled it or marked as settled by this review, and never return as rows without new evidence that reopens them. An accepted deferred P0/P1 also stays on the `Unresolved P0/P1:` line, because deferral is not resolution.
 

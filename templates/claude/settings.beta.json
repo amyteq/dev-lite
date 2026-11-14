@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "extraKnownMarketplaces": {
+    "dev-lite-beta": {
+      "source": {
+        "source": "github",
+        "repo": "amyteq/dev-lite",
+        "ref": "main",
+        "path": "channels/beta/.claude-plugin/marketplace.json"
+      },
+      "autoUpdate": true
+    }
+  },
+  "enabledPlugins": {
+    "dev-skills@dev-lite-beta": true,
+    "dev-planning@dev-lite-beta": true,
+    "dev-hooks@dev-lite-beta": true,
+    "dev-skills@dev-lite": false,
+    "dev-planning@dev-lite": false,
+    "dev-hooks@dev-lite": false
+  }
+}

@@ -9,6 +9,10 @@ disable-model-invocation: false
 
 In human-facing tables and lists, mark status with ✅ done or passed, 🔄 in progress, ⏳ waiting, ⛔ failed or blocked, ❓ unknown, ⏭️ skipped (with the reason) and ⚠️ needs attention. Keep emoji out of machine markers, phase and status tokens, finding IDs, code, commit messages and branch names.
 
+Write published comments, reviews and dispositions in the language of the PR body, and the terminal report in the language the user writes in. Keep code, agent handoffs and prompts in English, and keep machine markers, status tokens, quoted source text and the English report labels that [reports.md](references/reports.md) fixes unchanged.
+
+Discovering or selecting this skill grants no permission to post, change metadata, approve, merge or contact anyone. Before a remote write, establish that the current user authorized that kind of action; existing authorization persists, so do not ask again, and a draft-only request stays local.
+
 Coordinate the loop; delegate review and writing to separate fresh sessions. Keep changes and publication within the user’s authorized PR scope.
 
 Read the repository's `AGENTS.md` and `CLAUDE.md`, and the documentation of the affected component. Preserve the exact approved task contract and current authorization. Reviewer sessions are read-only; the writer may change code, tests and documentation only within the authorized PR scope. Neither role publishes to GitHub; the coordinator owns authorized publication.

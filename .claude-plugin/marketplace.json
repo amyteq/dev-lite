@@ -7,7 +7,7 @@
     {
       "name": "dev-skills",
       "source": "./plugins/dev-skills",
-      "description": "Review PRs in bounded rounds, refine issues into work orders, explain pending decisions, compact long threads.",
+      "description": "Review PRs in bounded rounds, refine issues into work orders, explain pending decisions, compact long threads, squash merge with a closeout, track discussion series.",
       "category": "development"
     },
     {

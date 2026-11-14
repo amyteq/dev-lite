@@ -8,7 +8,8 @@ This public repository publishes Claude Code / Codex plugins and a reusable GitH
 - Never write a bare agent mention in Markdown or comments; put it in a code span (`` `@claude` ``) so it does not trigger the Ask workflow.
 - Skills load from a plugin cache, not from the consumer repository. Reference consumer files by name ("the repository's `AGENTS.md`"), shared helpers as `${CLAUDE_PLUGIN_ROOT}/scripts/<file>` and a skill's own files as `${CLAUDE_SKILL_DIR}/<path>`.
 - Edit helpers in `shared/` only, then run `node scripts/sync-shared.mjs`.
-- A plugin change that consumers should receive bumps that plugin's `version` in `.claude-plugin/plugin.json` and adds a `CHANGELOG.md` entry.
+- A plugin change that consumers should receive bumps that plugin's `version` in `.claude-plugin/plugin.json` and adds a `CHANGELOG.md` entry. Changes on `main` ship to the beta channel first, as `X.Y.Z-beta.N`.
+- A new or renamed plugin goes into both `.claude-plugin/marketplace.json` and `channels/beta/.claude-plugin/marketplace.json`.
 - New prose and status messages in English.
 
 ## Checks

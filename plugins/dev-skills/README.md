@@ -1,6 +1,6 @@
 # dev-skills
 
-Four agent skills for GitHub-centred work in Claude Code and Codex.
+Six agent skills for GitHub-centred work in Claude Code and Codex.
 
 | Skill | Use it to |
 | --- | --- |
@@ -8,6 +8,8 @@ Four agent skills for GitHub-centred work in Claude Code and Codex.
 | `dev-refine-issue` | Turn an existing issue into a bounded work order with observable acceptance criteria, a task comment and copyable launch prompts. |
 | `dev-explain` | Explain pending human decisions on an issue, PR or discussion comment and append one result comment. It decides nothing. |
 | `dev-compact` | Compress a long issue, PR or discussion thread into a summary and archive parts, after an explicit request. |
+| `dev-merge` | Squash merge one reviewed PR when the owner explicitly asks: gate on the reviewed head, verify the merged tree, clean up branches and worktrees, post a closeout in the PR's language and update linked issues and trackers. Otherwise it runs as a dry run. |
+| `dev-track` | Register every unprocessed discussion of one category (such as meeting notes) in that category's tracker discussion: digest it in place, merge its TODOs, mark it done and close it. Drafts by default; writes only with `--apply`. |
 
 Each skill reads the consuming repository's `AGENTS.md` / `CLAUDE.md` for project rules.
 
@@ -17,7 +19,7 @@ Each skill reads the consuming repository's `AGENTS.md` / `CLAUDE.md` for projec
 
 The helper scripts need Node.js 20+ and one locked npm package. Claude Code installs it from the plugin's `package-lock.json` when the plugin is installed. Codex does not; run `npm ci --prefix "<installed plugin folder>"` once after installing or updating.
 
-The skills also need `gh` (authenticated), and `dev-review-pr` needs the `claude` and/or `codex` CLI for the sessions it launches.
+The skills also need `gh` (authenticated), and `dev-review-pr` needs the `claude` and/or `codex` CLI for the sessions it launches. `dev-merge` reads `dev-review-pr`'s review reports (or a formal approval) as its merge evidence; `dev-hooks`' `guard_pr_merge` still blocks merging a PR the signed-in account did not author.
 
 ## Test
 
