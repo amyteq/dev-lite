@@ -9,19 +9,14 @@ A processed meeting looks like this: its body opens with a digest readable at a 
 - **The notes are not always in the body.** When the body holds only an upload placeholder, digest the notes from the comment that has them and link it on the source line.
 - **Source of truth**: the transcript and human-written notes. Fathom's AI `## Summary` and decks generated after the meeting can be wrong (owners swapped, for one). Where they disagree, follow the transcript and say so in the digest, and say so too when the transcript covers only part of the recording; content found only in an attachment goes under the notes section, never among the decisions.
 - **Date** from the title (`1104会议纪要`, `20261102`, `@ 20261109`), else `createdAt`, as `YYYY-MM-DD`; a title without a year takes the year of `createdAt`. Relative dates in the notes ("by Friday", "next week") resolve against the meeting date; mark an ambiguous one `待核` / `to check`. **Attendees** are the speakers in the transcript. **Language**: the one the transcript is mostly spoken in — Chinese transcripts get a Chinese digest, English ones an English digest.
-- **Attachments** are `https://github.com/user-attachments/files/…` (an uploaded file) and `https://github.com/user-attachments/assets/…` (a pasted image, screenshot or video) links, in the body or a comment. Collect them with a tool and download each into its own new, empty directory; no URL reaches a command line:
+- **Attachments** are `https://github.com/user-attachments/files/…` (an uploaded file) and `https://github.com/user-attachments/assets/…` (a pasted image, screenshot or video) links, in the body or a comment. Collect them with a tool, then let the helper download each into its own new, empty directory `$S/NUMBER/att<n>/`; no URL or token reaches a command line, because the helper reads `gh auth token` itself and sends it only to these GitHub URLs, never to a redirect target:
 
 ```bash
 grep -oE 'https://github\.com/user-attachments/(files/[0-9]+/[A-Za-z0-9._%-]*|assets/[A-Za-z0-9-]*)[A-Za-z0-9]' $S/NUMBER/source.json | sort -u > $S/NUMBER/attachments.txt
-n=0; while IFS= read -r u; do n=$((n+1))
-  if [ "$n" -gt 20 ]; then printf '%s\n' "$u" >> $S/NUMBER/skipped.txt; continue; fi
-  mkdir -p $S/NUMBER/att$n
-  curl -fsSL --max-filesize 52428800 -H "Authorization: token $(gh auth token)" -o $S/NUMBER/att$n/file --url "$u" ||
-    { printf '%s\n' "$u" >> $S/NUMBER/failed.txt; rm -f $S/NUMBER/att$n/file; }
-done < $S/NUMBER/attachments.txt
+H download --list $S/NUMBER/attachments.txt --dir $S/NUMBER
 ```
 
-  The pattern stops at the end of a file name or asset id, so the prose around a bare URL stays out; a name with other characters is cut short and fails to download, so check `attachments.txt` against the discussion. At most 20 files come down (the rest go to `skipped.txt`); a failed download or one over 50 MB is deleted and its URL goes to `failed.txt`. Report both lists. An `/assets/` link has no file name: take its type from the bytes (`file $S/NUMBER/att$n/file`). Read a `.txt` directly; take only the text of a `.pptx`/`.docx`, running nothing from the file:
+  The pattern stops at the end of a file name or asset id, so the prose around a bare URL stays out; a name with other characters is cut short and fails to download, so check `attachments.txt` against the discussion. At most 20 files come down (the rest go to `skipped.txt`); a failed download or one over 50 MB is deleted and its URL goes to `failed.txt`. Report both lists. The JSON output lists `downloaded`, `failed` and `skipped`. An `/assets/` link has no file name: take its type from the bytes (`file $S/NUMBER/att1/file`). Read a `.txt` directly; take only the text of a `.pptx`/`.docx`, running nothing from the file:
 
 ```bash
 H text --file $S/NUMBER/att1/file > $S/NUMBER/att1/text.txt

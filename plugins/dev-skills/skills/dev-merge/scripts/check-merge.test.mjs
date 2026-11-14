@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import {
-  applyEdits, cleanupOutcome, closeoutTarget, detectLang, discoverTargets, gate, lintSquashBody, parseArgs, planCleanup,
+  applyEdits, cleanupOutcome, lintSquashMessage, closeoutTarget, detectLang, discoverTargets, gate, lintSquashBody, parseArgs, planCleanup,
   renderCi, renderCloseout, renderReport, resolvePr, runGuardedEdit, t, verifyMerge, warningText,
 } from './check-merge.mjs';
 import { apply, commandFor, deniedResults, execute, ignoredOf, mergeResults, parseWorktrees } from './apply-cleanup.mjs';
@@ -138,6 +138,13 @@ test('AC-3c a moved main needs merge-tree facts, then docs-only reuse, verify or
   }
 });
 
+test('AC-3c moved-base verification runs the checks the repository AGENTS.md requires, not workflow commands alone', () => {
+  const skill = readFileSync(new URL('../SKILL.md', import.meta.url), 'utf8');
+  const verify = skill.split('\n').find((line) => line.trimStart().startsWith('- `verify` →'));
+  assert.match(verify, /every check command the repository's `AGENTS\.md` requires/);
+  assert.match(verify, /When `AGENTS\.md` names no check command, the workflow commands alone verify, and the report says so/);
+});
+
 test('AC-3d evidence is the latest marked review on the head, or an APPROVED review of the head', () => {
   const older = terminal();
   const newer = terminal('d'.repeat(40));
@@ -255,6 +262,18 @@ test('AC-4b an issue the merge would close but nobody judged stops before the me
   assert.equal(lintSquashBody('Closes #9', [{ number: 9, complete: true }]).ok, true);
 });
 
+test('AC-4b the squash subject is linted with the body, and full issue URLs count as closing references', () => {
+  const issues = [{ number: 2, complete: false }];
+  assert.equal(lintSquashMessage({ subject: 'Fixes #2 (#1)', body: 'Ref #2', issues, prBody: 'Ref #2', closingIssues: [], repo: REPO }).ok, false);
+  assert.equal(lintSquashMessage({ body: 'Ref #2', issues, repo: REPO }).reason, 'subject-missing');
+  assert.equal(lintSquashMessage({ subject: 'Add x (#1)', body: 'Ref #2', issues, repo: REPO }).ok, true);
+  const url = `https://github.com/${REPO}/issues/2`;
+  assert.equal(lintSquashBody(`Fixes ${url}`, issues, '', [], REPO).ok, false, 'squash body');
+  assert.equal(lintSquashBody('Ref #2', issues, `Closes ${url}`, [], REPO).ok, false, 'PR body');
+  assert.equal(lintSquashBody('Ref #2', [], `Closes ${url}`, [], REPO).findings[0], '#2 would be closed but was not judged: add it to issues or unlink it');
+  assert.equal(lintSquashBody('Fixes https://github.com/other/project/issues/2', issues, '', [], REPO).ok, true);
+});
+
 test('AC-4c the squash commit must sit on the pre-merge main with the verified tree', () => {
   assert.equal(verifyMerge({ parents: [M], tree: 't', expectedParent: M, expectedTree: 't' }).ok, true);
   assert.equal(verifyMerge({ parents: [B], tree: 't', expectedParent: M, expectedTree: 't' }).reason, 'parent-mismatch');
@@ -265,7 +284,7 @@ test('AC-4c the squash commit must sit on the pre-merge main with the verified t
 // ---------- AC-5 ----------
 
 const inventory = (overrides = {}) => ({
-  mode: 'stale', repo: REPO, defaultBranch: 'main', mainCheckout: '/repo', sessionWorktree: '/repo/.claude/worktrees/pr134-s',
+  mode: 'stale', repo: REPO, commonDir: '/repo/.git', defaultBranch: 'main', mainCheckout: '/repo', sessionWorktree: '/repo/.claude/worktrees/pr134-s',
   scratchRoot: '/tmp/claude-1000', processCheck: 'ok', remoteHead: H,
   pr: { number: 134, state: 'MERGED', headRefName: 'claude/issue-129-image', headRefOid: H, sameRepo: true },
   prsByName: { 'claude/old': { number: 90, state: 'MERGED' }, 'claude/live': { number: 140, state: 'OPEN' },
@@ -518,6 +537,21 @@ test('AC-5e removals are single argv commands; apply runs only what a fresh plan
   apply(forged, plan, inv, (item) => { seen.push(item); return { kind: item.kind, target: item.target, exit: 0 }; });
   assert.ok(seen.every((item) => item.head !== D), 'a saved plan cannot change what a fresh plan runs, the lease included');
   assert.deepEqual(planCleanup(inventory({ mode: 'none' })).remove, []);
+});
+
+test('AC-5e a saved plan runs only in the repository and Git storage it was made for', () => {
+  const inv = inventory({ mode: 'own' });
+  const plan = planCleanup(inv);
+  const ran = [];
+  const exec = (item) => { ran.push(item); return { kind: item.kind, target: item.target, exit: 0 }; };
+  for (const other of [inventory({ mode: 'own', repo: 'example-org/other-repo' }), inventory({ mode: 'own', commonDir: '/elsewhere/.git' })]) {
+    assert.throws(() => apply(plan, planCleanup(other), other, exec), /not this checkout/);
+  }
+  const { repo, commonDir, ...unbound } = plan;
+  assert.throws(() => apply(unbound, plan, inv, exec), /not this checkout/);
+  assert.deepEqual(ran, [], 'nothing runs, the local and remote branches included');
+  apply(plan, planCleanup(inventory({ mode: 'own', repo: REPO.toUpperCase() })), inventory({ mode: 'own', repo: REPO.toUpperCase() }), exec);
+  assert.ok(ran.some((item) => item.kind === 'remote-branch') && ran.some((item) => item.kind === 'local-branch'));
 });
 
 test('AC-5 worktree porcelain parsing keeps branch, detached and locked state', () => {

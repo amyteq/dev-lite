@@ -82,6 +82,7 @@ export function collect({ pr, mode }) {
     prsByName[item.headRefName] ??= { number: item.number, state: item.state };
     prsByHead[item.headRefOid] ??= { number: item.number, state: item.state };
   }
+  const commonDir = realpathSync(resolve(read('git', ['rev-parse', '--git-common-dir']).trim()));
   const worktrees = parseWorktrees(read('git', ['worktree', 'list', '--porcelain']));
   const mainCheckout = worktrees[0].path;
   const top = run('git', ['rev-parse', '--show-toplevel']).stdout.trim();
@@ -96,7 +97,7 @@ export function collect({ pr, mode }) {
     .map((line) => { const [name, head] = line.split(' '); return { name, head, ancestorOfMain: isAncestor(head, main), containedInPr: isAncestor(head, info.headRefOid) }; });
   const remote = run('gh', ['api', `repos/${repo}/branches/${encodeURIComponent(info.headRefName)}`, '--jq', '.commit.sha']);
   return {
-    repo, mode, main, mainMissing: run('git', ['cat-file', '-e', `${main}^{commit}`]).status !== 0, defaultBranch, mainCheckout, sessionWorktree, scratchRoot, processCheck: check,
+    repo, commonDir, mode, main, mainMissing: run('git', ['cat-file', '-e', `${main}^{commit}`]).status !== 0, defaultBranch, mainCheckout, sessionWorktree, scratchRoot, processCheck: check,
     pr: { number: info.number, state: info.state, headRefName: info.headRefName, headRefOid: info.headRefOid, sameRepo: !info.isCrossRepository },
     prsByName, prsByHead, branches, remoteHead: remote.status === 0 ? remote.stdout.trim() || null : null,
     worktrees: worktrees.map((wt) => ({
@@ -159,6 +160,10 @@ export function deniedResults(plan, planPath) {
 const key = (item) => `${item.kind}\0${item.target}`;
 
 export function apply(saved, fresh, inv, exec = execute) {
+  // A plan copied to another checkout must not delete that repository's same-named branches or worktrees.
+  if (!saved.repo || !saved.commonDir || saved.repo.toLowerCase() !== String(inv.repo).toLowerCase() || saved.commonDir !== inv.commonDir) {
+    throw new Error(`the plan was made for ${saved.repo ?? 'an unknown repository'} at ${saved.commonDir ?? 'unknown Git storage'}, not this checkout`);
+  }
   // Walk the fresh plan in its order and run only items the saved plan also lists, so a saved plan can only
   // narrow what runs, never change a target or the lease.
   const planned = new Set(saved.remove.map(key));

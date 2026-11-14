@@ -9,7 +9,7 @@ import { dirname, join } from 'node:path';
 import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { deflateRawSync } from 'node:zlib';
-import { brief, hasDuplicate, isDone, locate, rebuild, retitle, setTracker, trackerOf } from './track.mjs';
+import { brief, download, hasDuplicate, isDone, locate, rebuild, retitle, setTracker, trackerOf } from './track.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const CLI = join(here, 'track.mjs');
@@ -549,4 +549,36 @@ test('a member larger than it declares, or a file that is no zip, is not read', 
   assert.deepEqual([lying.status, lying.stdout], [2, '']);
   const plain = readZip(file('plain.docx', 'not a zip'));
   assert.deepEqual([plain.status, JSON.parse(plain.stdout).reason], [1, 'no zip end record: nothing read']);
+});
+
+test('download sends the token only to GitHub attachment URLs, never in argv, a redirect or the output', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'track-dl-'));
+  const calls = [];
+  const body = (text) => [Buffer.from(text)];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, auth: init.headers?.Authorization ?? null });
+    if (url.endsWith('/redirect')) return { status: 302, ok: false, headers: new Headers({ location: 'https://storage.example/signed' }) };
+    if (url.endsWith('/big')) return { status: 200, ok: true, headers: new Headers(), body: body('x'.repeat(11)) };
+    if (url.endsWith('/gone')) return { status: 404, ok: false, headers: new Headers() };
+    return { status: 200, ok: true, headers: new Headers(), body: body('bytes') };
+  };
+  const urls = ['https://github.com/user-attachments/files/1/a.txt', 'https://github.com/user-attachments/assets/redirect',
+    'https://evil.example/user-attachments/files/2/b', 'https://github.com/user-attachments/files/3/big',
+    'https://github.com/user-attachments/files/4/gone', 'https://github.com/user-attachments/files/5/late'];
+  const result = await download(urls, dir, { token: () => 'SECRET', fetchImpl, limit: 5, maxBytes: 10 });
+  assert.deepEqual(result.downloaded.map((item) => item.url), urls.slice(0, 2));
+  assert.equal(readFileSync(join(dir, 'att2', 'file'), 'utf8'), 'bytes');
+  assert.deepEqual(result.failed.map((item) => item.reason), ['not a GitHub attachment URL', 'too large', 'HTTP 404']);
+  assert.deepEqual(result.skipped, [urls[5]]);
+  assert.deepEqual(calls.filter((call) => call.auth).map((call) => call.url), [urls[0], urls[1], urls[3], urls[4]]);
+  assert.ok(calls.every((call) => call.auth === null || call.url.startsWith('https://github.com/user-attachments/')));
+  assert.ok(!JSON.stringify(result).includes('SECRET'));
+  assert.equal(readFileSync(join(dir, 'failed.txt'), 'utf8'), `${urls[2]}\n${urls[3]}\n${urls[4]}\n`);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('the meeting playbook downloads through the helper, never with a token on a command line', () => {
+  const playbook = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'references', 'meetings.md'), 'utf8');
+  assert.ok(!/\$\(gh auth token\)|Authorization:|\bcurl /.test(playbook));
+  assert.ok(playbook.includes('H download --list $S/NUMBER/attachments.txt --dir $S/NUMBER'));
 });

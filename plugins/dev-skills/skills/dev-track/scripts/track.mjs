@@ -1,12 +1,14 @@
-import { readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { appendFileSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { inflateRawSync } from 'node:zlib';
 import { fromMarkdown } from 'mdast-util-from-markdown';
 
 // Deterministic parts of dev-track: locate the tracker, list pending threads, rebuild a body, swap the
-// title's status prefix, add or remove the tracker mark, read an attachment's text. Reads `gh api graphql --paginate --slurp` output and
-// local files; never calls GitHub. Exit 0 proceeds, 1 refuses (reason in the JSON output), 2 means bad
+// title's status prefix, add or remove the tracker mark, read an attachment's text, download attachments. Reads
+// `gh api graphql --paginate --slurp` output and local files; only `download` calls GitHub, keeping the token out of argv and logs. Exit 0 proceeds, 1 refuses (reason in the JSON output), 2 means bad
 // arguments or an unreadable file.
 
 const parsed = new Map();
@@ -314,6 +316,54 @@ export function officeText(zip) {
   return { action: 'proceed', text: lines.map((line) => `${line}\n`).join('') };
 }
 
+// Only GitHub's attachment URLs get the token; a redirect target (signed storage URL) is fetched without it.
+const ATTACHMENT = /^https:\/\/github\.com\/user-attachments\/(?:files|assets)\//;
+const DOWNLOAD = { FILES: 20, BYTES: 50 << 20 };
+
+async function fetchCapped(url, init, fetchImpl, maxBytes) {
+  let res = await fetchImpl(url, { ...init, redirect: 'manual' });
+  if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
+    res = await fetchImpl(new URL(res.headers.get('location'), url).href, { redirect: 'follow' });
+  }
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (Number(res.headers.get('content-length')) > maxBytes) throw new Error('too large');
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of res.body ?? []) {
+    size += chunk.length;
+    if (size > maxBytes) throw new Error('too large');
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+/** Download each attachment URL into DIR/att<n>/file; the token comes from `gh auth token` in-process, never argv. */
+export async function download(urls, dir, { token = () => spawnSync('gh', ['auth', 'token'], { encoding: 'utf8' }).stdout?.trim(),
+  fetchImpl = fetch, limit = DOWNLOAD.FILES, maxBytes = DOWNLOAD.BYTES } = {}) {
+  const result = { action: 'proceed', downloaded: [], failed: [], skipped: [] };
+  let secret = null;
+  for (const [index, url] of urls.entries()) {
+    if (index >= limit) { result.skipped.push(url); continue; }
+    const file = join(dir, `att${index + 1}`, 'file');
+    try {
+      if (!ATTACHMENT.test(url)) throw new Error('not a GitHub attachment URL');
+      secret ??= token() || null;
+      if (!secret) throw new Error('no gh auth token');
+      const bytes = await fetchCapped(url, { headers: { Authorization: `token ${secret}` } }, fetchImpl, maxBytes);
+      mkdirSync(join(dir, `att${index + 1}`), { recursive: true });
+      writeFileSync(file, bytes);
+      result.downloaded.push({ url, file });
+    } catch (error) {
+      rmSync(file, { force: true });
+      result.failed.push({ url, reason: secret ? error.message.replaceAll(secret, '***') : error.message });
+    }
+  }
+  for (const [name, list] of [['failed.txt', result.failed.map((item) => item.url)], ['skipped.txt', result.skipped]]) {
+    if (list.length) appendFileSync(join(dir, name), list.map((url) => `${url}\n`).join(''));
+  }
+  return result;
+}
+
 // Strict UTF-8 with universal newlines, as the original's Path.read_text read every file.
 const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 const readText = (path) => decoder.decode(readFileSync(path)).replace(/\r\n?/g, '\n');
@@ -332,6 +382,7 @@ const COMMANDS = {
   title: { options: { title: S, status: S, base: S }, required: ['title', 'status'] },
   tracker: { options: { source: S, cat: S, category: S, remove: { type: 'boolean' }, out: S }, required: ['source', 'out'] },
   text: { options: { file: S }, required: ['file'] },
+  download: { options: { list: S, dir: S }, required: ['list', 'dir'] },
 };
 
 function readArgs([command, ...args]) {
@@ -354,6 +405,11 @@ export function main(argv) {
   let result, ok;
   try {
     const args = readArgs(argv);
+    if (args.command === 'download') {
+      const urls = [...new Set(readText(args.list).split('\n').map((line) => line.trim()).filter(Boolean))];
+      return download(urls, args.dir).then((summary) => { process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`); return 0; },
+        (error) => { process.stderr.write(`track: ${error.message}\n`); return 2; });
+    }
     if (args.command === 'locate') {
       const pages = JSON.parse(readText(args.pages));
       const repos = (Array.isArray(pages) ? pages : [pages]).map((page) => page.data.repository);
@@ -405,4 +461,4 @@ function isDirectInvocation(entryPath) {
   catch { return false; }
 }
 
-if (isDirectInvocation(process.argv[1])) process.exitCode = main(process.argv.slice(2));
+if (isDirectInvocation(process.argv[1])) Promise.resolve(main(process.argv.slice(2))).then((code) => { process.exitCode = code; });

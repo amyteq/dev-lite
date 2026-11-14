@@ -158,7 +158,7 @@ const GREEN = new Set(['SUCCESS', 'SKIPPED', 'NEUTRAL']);
 
 /**
  * Decide whether the PR may be merged now. Verdicts: pass (merge), collect (supply mergeTree and
- * mainChanges), verify (run the CI test commands on the merge tree and supply verifyExit), stop.
+ * mainChanges), verify (run the repository's `AGENTS.md` checks and the matching CI test commands on the merge tree and supply verifyExit), stop.
  */
 export function gate(input) {
   const { pr, main } = input;
@@ -195,9 +195,11 @@ export function gate(input) {
 
 const CLOSING = /\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b:?\s+([\w.-]+\/[\w.-]+)?#(\d+)/gi;
 // A reference may name another repository, whose numbers say nothing about this one's issues. An
-// unqualified reference is always local, and GitHub compares repository names case-insensitively.
+// unqualified reference is always local, and GitHub compares repository names case-insensitively. A full issue
+// URL counts as its <owner>/<repo>#<n> form, as GitHub reads it after a closing keyword too.
+const shortRefs = (text) => text.replace(/https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/issues\/(\d+)\b/gi, '$1#$2');
 const repoRefs = (text = '', repo = '', re = CLOSING) =>
-  [...text.matchAll(re)].filter((m) => !m[2] || m[2].toLowerCase() === String(repo).toLowerCase());
+  [...shortRefs(text).matchAll(re)].filter((m) => !m[2] || m[2].toLowerCase() === String(repo).toLowerCase());
 
 /** AC-4b: a closing keyword may name only an issue whose acceptance criteria are all delivered. */
 export function lintSquashBody(body, issues = [], prBody = '', closingIssues = [], repo = '') {
@@ -212,6 +214,12 @@ export function lintSquashBody(body, issues = [], prBody = '', closingIssues = [
   const closes = new Set([...prCloses, ...repoRefs(body, repo).map((m) => Number(m[3]))]);
   for (const n of closes) if (!judged.has(n)) findings.push(`#${n} would be closed but was not judged: add it to issues or unlink it`);
   return findings.length ? { ok: false, reason: 'closing-keyword', findings } : { ok: true };
+}
+
+/** AC-4b: GitHub reads closing keywords in the squash subject as well as its body, so both are linted together. */
+export function lintSquashMessage({ subject, body = '', issues, prBody, closingIssues, repo }) {
+  if (typeof subject !== 'string' || !subject.trim()) return fail('subject-missing', 'lint the squash subject with its body');
+  return lintSquashBody(`${subject}\n\n${body}`, issues, prBody, closingIssues, repo);
 }
 
 /** AC-4c: the squash commit sits on the pre-merge main and carries the verified tree. */
@@ -238,7 +246,9 @@ export function planCleanup(inv) {
   const n = inv.pr.number;
   const remove = [];
   const skip = [];
-  if (inv.mode === 'none') return { remove, skip: [{ kind: 'all', target: 'cleanup=none', reason: 'cleanup-not-requested' }] };
+  // apply refuses a saved plan whose repository or Git storage differs from the checkout it runs in.
+  const bound = { repo: inv.repo, commonDir: inv.commonDir };
+  if (inv.mode === 'none') return { ...bound, remove, skip: [{ kind: 'all', target: 'cleanup=none', reason: 'cleanup-not-requested' }] };
   // Without main's commit every ancestry answer is "no", which would misreport merged heads as unmerged.
   if (inv.mainMissing) throw new Error(`main commit ${inv.main} is not in the local repository; fetch main, then plan again`);
   const ownBranch = (name) => name === inv.pr.headRefName || new RegExp(`^pr${n}-w\\d+$`).test(name);
@@ -304,7 +314,7 @@ export function planCleanup(inv) {
   }
   const order = ['worktree', 'local-branch', 'remote-branch', 'scratch', 'exit-worktree'];
   remove.sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind));
-  return { remove, skip };
+  return { ...bound, remove, skip };
 }
 
 // ---------- AC-8: related issues, discussions, trackers, next ----------
@@ -632,7 +642,7 @@ const COMMANDS = {
   args: (i) => { const parsed = parseArgs(i.text, i.repo); if (!parsed.ok) return parsed; const pr = resolvePr(parsed.args, i.branchPrs); return pr.ok ? { ok: true, args: { ...parsed.args, pr: pr.pr } } : pr; },
   // Exit 1 means stop, so collect and verify, which the procedure continues on, are successful exits.
   gate: (i) => { const g = gate(i); return { ok: g.verdict !== 'stop', ...g }; },
-  'lint-body': (i) => lintSquashBody(i.body, i.issues, i.prBody, i.closingIssues, i.repo),
+  'lint-body': (i) => lintSquashMessage(i),
   'verify-merge': (i) => verifyMerge(i),
   plan: (i) => ({ ok: true, ...planCleanup(i) }),
   discover: (i) => ({ ok: true, ...discoverTargets(i) }),

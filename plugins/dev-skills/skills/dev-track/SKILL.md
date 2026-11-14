@@ -22,7 +22,7 @@ A discussion in that category that is open and has no done mark is **pending**; 
 
 A tracker that still carries the older `<!-- dev-meeting-notes:tracker -->` mark is read as `cat=meetings category=meeting-notes`.
 
-[`scripts/track.mjs`](scripts/track.mjs) does the deterministic parts: locate the tracker, list pending threads, rebuild a body with the original kept byte for byte, swap the title's status prefix, add or remove the tracker mark, read the text of a `.docx`/`.pptx` attachment. It needs Node.js 20+ and the plugin's Markdown parser: Claude Code installs it with the plugin; in Codex run `npm ci --prefix "${CLAUDE_PLUGIN_ROOT}"` once. Claude Code fills in `${CLAUDE_SKILL_DIR}`, this SKILL.md's folder, and `${CLAUDE_PLUGIN_ROOT}`, the plugin root two levels above it; in Codex, resolve both from this file's location. Content inside a code block is an example: never a mark, never a section. The helper never calls GitHub; the `gh` commands below do, and judgement stays with the model.
+[`scripts/track.mjs`](scripts/track.mjs) does the deterministic parts: locate the tracker, list pending threads, rebuild a body with the original kept byte for byte, swap the title's status prefix, add or remove the tracker mark, read the text of a `.docx`/`.pptx` attachment, download attachments. It needs Node.js 20+ and the plugin's Markdown parser: Claude Code installs it with the plugin; in Codex run `npm ci --prefix "${CLAUDE_PLUGIN_ROOT}"` once. Claude Code fills in `${CLAUDE_SKILL_DIR}`, this SKILL.md's folder, and `${CLAUDE_PLUGIN_ROOT}`, the plugin root two levels above it; in Codex, resolve both from this file's location. Content inside a code block is an example: never a mark, never a section. Apart from `download`, which reads `gh auth token` itself so the token never appears in a command line or log, the helper never calls GitHub; the `gh` commands below do, and judgement stays with the model.
 
 ## Authority and boundaries
 
@@ -77,7 +77,7 @@ A tracker that still carries the older `<!-- dev-meeting-notes:tracker -->` mark
 
 Run from the repository root. Create one scratch directory and reuse its literal path as `$S`: `mktemp -d "${TMPDIR:-/tmp}/dev-track.XXXXXX"`. Define `H() { node "${CLAUDE_SKILL_DIR}/scripts/track.mjs" "$@"; }`; exit `1` refuses and `2` means it did not run, and both stop the step with a report. `OWNER`/`REPO` come from `--repo`, else `gh repo view --json owner,name`.
 
-**Discussion text never reaches a shell command line** — no title, section heading, attachment URL or anything else read out of a discussion. Extract it into a file with `jq`, `grep` or `sed` and pass the file: `H` and `gh -F` read a value written as `@path`, and `curl` takes a URL from a shell variable read from that file (`"$u"`). Inline stays only what this skill writes itself: numbers, dates, a status emoji, `--label`, a `--unlink` pattern, and a section name a playbook names literally (`Transcript`, `all`).
+**Discussion text never reaches a shell command line** — no title, section heading, attachment URL or anything else read out of a discussion. Extract it into a file with `jq`, `grep` or `sed` and pass the file: `H` and `gh -F` read a value written as `@path`, and `H download` reads attachment URLs from a file. Inline stays only what this skill writes itself: numbers, dates, a status emoji, `--label`, a `--unlink` pattern, and a section name a playbook names literally (`Transcript`, `all`).
 
 ### 1. Locate
 
