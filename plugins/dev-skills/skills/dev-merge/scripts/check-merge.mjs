@@ -399,7 +399,9 @@ export function discoverTargets(input) {
       const trackerBody = input.trackerBodies?.[tracker];
       if (trackerBody === undefined) { warnings.push({ code: 'tracker-unread', issue: tracker }); continue; }
       const found = headings(trackerBody).filter((h) => h.depth >= 2 && h.depth <= 3 && NEXT.has(h.text.trim().toLowerCase()));
-      if (found.length === 1) next.push({ issue: tracker, action: 'update', section: found[0].text });
+      // `was` is the drafting base: a `{section, content}` edit carries it so the helper stops if the section changed since.
+      const range = found.length === 1 && sectionRange(trackerBody, found[0].text);
+      if (found.length === 1) next.push({ issue: tracker, action: 'update', section: found[0].text, ...(range.ok && { was: trackerBody.slice(range.start, range.end) }) });
       else if (!found.length) next.push({ issue: tracker, action: 'create', section: t(lang, 'next.heading') });
       else warnings.push({ code: 'next-ambiguous', issue: tracker });
     }
@@ -430,7 +432,7 @@ export function sectionRange(body, title) {
 /**
  * Apply edits to a body. Each edit is one of:
  *   { section, find, replace }  exact-once replacement inside the section (whole body without section)
- *   { section, content }        replace the section's content
+ *   { section, content, was }   replace the section's content, only while it still equals `was` (the text it was drafted from)
  *   { create: { heading, content } }  new section before the first AUTO region, or at the end
  * `{{now}}` in new text becomes the write-time stamp.
  */
@@ -459,6 +461,8 @@ export function applyEdits(body, edits, now) {
     if (!range.ok) return fail(range.reason, edit.section);
     const part = text.slice(range.start, range.end);
     let replaced;
+    // A whole-section replacement would drop anything added since its draft, so a changed section stops for redrafting.
+    if (edit.content !== undefined && (edit.was === undefined || part.trim() !== String(edit.was).trim())) return fail(edit.was === undefined ? 'base-missing' : 'section-changed', edit.section);
     if (edit.content !== undefined) replaced = `\n${fill(edit.content).replace(/^\n*/, '').replace(/\n*$/, '\n')}\n`;
     else {
       const count = part.split(edit.find).length - 1;

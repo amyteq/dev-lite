@@ -657,7 +657,8 @@ test('AC-7c a denied deletion is never rendered as done and lands in the owner b
 
 // ---------- AC-8 ----------
 
-const NEXT_BODY = '## Current work\n\n- x\n\n## Next steps\n\n| # | Step |\n| --- | --- |\n| 1 | a |\n\n## Open questions\n';
+const NEXT_WAS = '\n| # | Step |\n| --- | --- |\n| 1 | a |\n\n';
+const NEXT_BODY = `## Current work\n\n- x\n\n## Next steps\n${NEXT_WAS}## Open questions\n`;
 const discovery = (overrides = {}) => ({
   repo: REPO,
   prBody: `Fix image display.\n\nRef #129\nCloses #75\nSee https://github.com/${REPO}/discussions/94 and #71`,
@@ -692,7 +693,7 @@ test("AC-8a a reference to another repository is not this repository's issue, di
   const refTracker = (prBody) => discoverTargets(discovery({ prBody, prLabels: [], issueMeta: {}, closingIssues: [] }));
   const bareTracker = refTracker('Ref #71');
   assert.deepEqual(bareTracker.trackers, [71]);
-  assert.deepEqual(bareTracker.next, [{ issue: 71, action: 'update', section: 'Next steps' }]);
+  assert.deepEqual(bareTracker.next, [{ issue: 71, action: 'update', section: 'Next steps', was: NEXT_WAS }]);
   assert.deepEqual(refTracker(`Ref ${REPO.toUpperCase()}#71`), bareTracker, 'a qualified mention of this repository is the same tracker');
   assert.deepEqual(refTracker('Ref other/project#71').trackers, []);
   // GitHub reads a link case-insensitively, so a differently cased link to this repository is still local.
@@ -719,11 +720,11 @@ test('AC-8c trackers come from the body or one tracking issue per feat label; ga
 });
 
 test('AC-8d next updates one next-steps heading, creates one when absent, skips duplicates', () => {
-  assert.deepEqual(discoverTargets(discovery()).next, [{ issue: 71, action: 'update', section: 'Next steps' }]);
+  assert.deepEqual(discoverTargets(discovery()).next, [{ issue: 71, action: 'update', section: 'Next steps', was: NEXT_WAS }]);
   assert.deepEqual(discoverTargets(discovery({ trackerBodies: { 71: '## Current work\n' } })).next, [{ issue: 71, action: 'create', section: 'Next steps' }]);
   // Headings of every locale count, so two in different languages are still a duplicate.
   assert.deepEqual(discoverTargets(discovery({ trackerBodies: { 71: `### ${ZH['next.headings'][0]}\n\n## Next steps\n` } })).next, []);
-  assert.deepEqual(discoverTargets(discovery({ trackerBodies: { 71: `## ${ZH['next.headings'][1]}\n` } })).next, [{ issue: 71, action: 'update', section: ZH['next.headings'][1] }]);
+  assert.deepEqual(discoverTargets(discovery({ trackerBodies: { 71: `## ${ZH['next.headings'][1]}\n` } })).next, [{ issue: 71, action: 'update', section: ZH['next.headings'][1], was: '' }]);
   assert.deepEqual(discoverTargets(discovery({ trackerBodies: { 71: '```\n## Next steps\n```\n' } })).next[0].action, 'create');
   assert.deepEqual(discoverTargets(discovery({ args: { next: { issue: 71, comment: 9 } } })).next, [{ issue: 71, comment: 9, action: 'update' }]);
   // A created heading is written into the tracker, so it follows the language of this run's comments.
@@ -774,6 +775,21 @@ test('AC-9b drift rebuilds on the fresh body and stops after two retries', () =>
   assert.equal(runGuardedEdit({ edits, gh: moving }).reason, 'drift');
 });
 
+test('AC-9b a section replacement keeps human edits made since its draft: it stops instead of retrying over them', () => {
+  const edits = [{ section: 'Next steps', content: '| 1 | done |', was: NEXT_WAS }];
+  const added = NEXT_BODY.replace('| 1 | a |\n', '| 1 | a |\n| 2 | human |\n');
+  // The follow-up lands during the freshness read; the retry must not write the stale draft over it.
+  const raced = fakeGh([{ body: NEXT_BODY, updated_at: 't1' }, { body: added, updated_at: 't2' }, { body: added, updated_at: 't2' }]);
+  assert.equal(runGuardedEdit({ edits, gh: raced }).reason, 'section-changed');
+  assert.deepEqual(raced.state.writes, []);
+  // The same holds when the change landed before the first read.
+  assert.equal(runGuardedEdit({ edits, gh: fakeGh([{ body: added, updated_at: 't2' }]) }).reason, 'section-changed');
+  assert.equal(applyEdits(NEXT_BODY, [{ section: 'Next steps', content: 'x' }], 'n').reason, 'base-missing');
+  const written = runGuardedEdit({ edits, gh: fakeGh([{ body: NEXT_BODY, updated_at: 't1' }, { body: NEXT_BODY, updated_at: 't1' }]) });
+  assert.equal(written.status, 'written');
+  assert.ok(written.body.includes('| 1 | done |'));
+});
+
 test('AC-9c a missing or repeated anchor, or a missing section, stops without writing', () => {
   assert.equal(applyEdits(NEXT_BODY, [{ section: 'Next steps', find: 'zzz', replace: 'y' }], 'n').reason, 'anchor-missing');
   assert.equal(applyEdits(NEXT_BODY, [{ section: 'Next steps', find: '|', replace: 'y' }], 'n').reason, 'anchor-duplicate');
@@ -790,7 +806,7 @@ test('AC-9d the freshness read happens before the write and never alongside it',
 
 test('AC-9e bytes outside the edited section, including <details> history, stay identical', () => {
   const body = '## Current work\n\n<details><summary>History</summary>\n\nold\n\n</details>\n\n## Next steps\n\nold table\n\n## Open questions\n\n- q\n\n<!-- AUTO:BEGIN -->\nx\n<!-- AUTO:END -->\n';
-  const result = applyEdits(body, [{ section: 'Next steps', content: 'new table' }], 'n');
+  const result = applyEdits(body, [{ section: 'Next steps', content: 'new table', was: 'old table' }], 'n');
   const [before, after] = body.split('old table');
   assert.ok(result.body.startsWith(before.replace(/\n+$/, '')));
   assert.ok(result.body.endsWith(after.replace(/^\n+/, '')));
@@ -830,7 +846,7 @@ test('AC-9g an ATX heading indented up to three spaces is the same section, so n
 test('AC-9h an AUTO:BEGIN inside a code fence bounds no section and takes no insertion', () => {
   const fenced = '## Next steps\n\n| 1 | a |\n\n```md\n<!-- AUTO:BEGIN -->\nexample\n<!-- AUTO:END -->\n```\n\n## Open questions\n\n- q\n';
   // The example marker must not end the section, so a replacement never cuts the fence in half.
-  const replaced = applyEdits(fenced, [{ section: 'Next steps', content: 'new' }], 'n');
+  const replaced = applyEdits(fenced, [{ section: 'Next steps', content: 'new', was: fenced.slice(14, fenced.indexOf('## Open')) }], 'n');
   assert.ok(replaced.ok);
   assert.ok(replaced.body.endsWith('## Open questions\n\n- q\n'));
   assert.ok(!replaced.body.includes('```'), 'no orphaned half of the fenced example survives');
