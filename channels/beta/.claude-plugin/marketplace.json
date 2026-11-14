@@ -1,0 +1,26 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "dev-lite-beta",
+  "description": "Beta channel of dev-lite: the same plugins, taken from the head of main instead of the v0 release tag.",
+  "owner": { "name": "amyteq", "url": "https://github.com/amyteq" },
+  "plugins": [
+    {
+      "name": "dev-skills",
+      "source": { "source": "git-subdir", "url": "https://github.com/amyteq/dev-lite.git", "path": "plugins/dev-skills", "ref": "main" },
+      "description": "Beta: review PRs, refine issues, explain decisions, compact threads, squash merge with a closeout, track discussion series.",
+      "category": "development"
+    },
+    {
+      "name": "dev-planning",
+      "source": { "source": "git-subdir", "url": "https://github.com/amyteq/dev-lite.git", "path": "plugins/dev-planning", "ref": "main" },
+      "description": "Beta: plan features and stories (FT_/STY_ docs) and refine stories into dispatchable work.",
+      "category": "development"
+    },
+    {
+      "name": "dev-hooks",
+      "source": { "source": "git-subdir", "url": "https://github.com/amyteq/dev-lite.git", "path": "plugins/dev-hooks", "ref": "main" },
+      "description": "Beta: guardrail and audit hooks.",
+      "category": "security"
+    }
+  ]
+}

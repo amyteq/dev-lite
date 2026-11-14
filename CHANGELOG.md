@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased (v0.1.0)
+## 0.2.0-beta.1 (beta channel, unreleased)
+
+- `dev-skills` 0.2.0-beta.1:
+  - New `dev-merge`: squash merge one reviewed PR on the owner's explicit request, verify the merged tree, clean up, post a closeout in the PR body's language and update linked issues and trackers (#15). The PR's base branch replaces a hard-coded `main`.
+  - New `dev-track`: register every unprocessed discussion of one category (the `meetings` playbook digests meeting notes in place and merges their TODOs) in that category's tracker discussion. It replaces the planned `dev-meeting-notes` (#16).
+  - `dev-review-pr`: published reports follow the PR body's language with the `Base:`, `Reviewed head:` and `Verdict:` labels kept in English for `dev-merge`; selecting the skill grants no write permission.
+- Beta channel: the `dev-lite-beta` marketplace (`channels/beta/`) serves the plugins from the head of `main`; projects opt in with `templates/claude/settings.beta.json`.
+
+## 0.1.0 (to be tagged `v0.1.0` and `v0`)
 
 - Marketplace `dev-lite` with plugins `dev-skills`, `dev-planning` and `dev-hooks`.
 - Reusable `ask-agent.yml` workflow with caller templates for Claude Code and Codex.

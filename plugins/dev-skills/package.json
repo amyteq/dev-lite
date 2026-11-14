@@ -1,8 +1,8 @@
 {
   "name": "dev-skills",
-  "version": "0.1.0",
+  "version": "0.2.0-beta.1",
   "private": true,
-  "description": "Helpers and tests for the dev-review-pr, dev-refine-issue, dev-explain and dev-compact agent skills.",
+  "description": "Helpers and tests for the dev-review-pr, dev-refine-issue, dev-explain, dev-compact, dev-merge and dev-track agent skills.",
   "type": "module",
   "engines": {
     "node": ">=20"
